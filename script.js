@@ -72,7 +72,9 @@ function _sbArrayToFakeFile(rows, filename) {
   const wb  = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
   const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  return new File([out], filename, { type: "application/octet-stream" });
+  const f   = new File([out], filename, { type: "application/octet-stream" });
+  f._fromSupabase = true;  // flag to skip size warning in loadFile
+  return f;
 }
 
 // Saves a freshly-parsed dataset to Supabase, replacing whatever was there
@@ -200,6 +202,26 @@ function sbApplyAuthUI() {
 }
 
 async function sbInitAuth() {
+  // Listen for auth state changes (handles refresh token restore)
+  sb.auth.onAuthStateChange(async (event, session) => {
+    const user = session?.user || null;
+    // Only act on sign-in events or initial session restore
+    if ((event === "SIGNED_IN" || event === "INITIAL_SESSION") && user) {
+      // Avoid double-loading if already loaded for this user
+      if (currentUser && currentUser.id === user.id) return;
+      currentUser = user;
+      isAdmin     = await sbCheckAdmin(currentUser.id);
+      sbApplyAuthUI();
+      await sbLoadAllDatasets();
+      if (!isAdmin) setTimeout(() => renderPage("dashboard"), 400);
+    } else if (event === "SIGNED_OUT") {
+      currentUser = null;
+      isAdmin     = false;
+      sbApplyAuthUI();
+    }
+  });
+
+  // Also try getSession immediately (for faster load if session already available)
   const { data: { session } } = await sb.auth.getSession();
   currentUser = session?.user || null;
   isAdmin     = currentUser ? await sbCheckAdmin(currentUser.id) : false;
@@ -415,8 +437,8 @@ function fmtLocalDate(d) {
 
 // ── LOAD & PROCESS EXCEL ───────────────────────────────────────────────────
 function loadFile(file) {
-  // FIX PERF-2: warn before parsing very large files
-  if (file.size > 25 * 1024 * 1024) {
+  // FIX PERF-2: warn before parsing very large files (skip for Supabase-loaded files)
+  if (!file._fromSupabase && file.size > 25 * 1024 * 1024) {
     if (!confirm(`This file is ${(file.size / 1024 / 1024).toFixed(1)} MB. Large files may take a few seconds to parse. Continue?`)) return;
   }
 
