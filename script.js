@@ -85,6 +85,20 @@
 //                   logic and are used everywhere transit figures are surfaced.
 //                   Branch Comparison already applied this exclusion (FIX-PHANTOM-BRANCH
 //                   from v2.2); this fix brings Dashboard, Home, and Flow in line.
+//
+//  FIX-PHANTOM-VISIBLE Unverified transit items (phantom) are now fully visible to
+//                   users instead of only being mentioned in an alert banner.
+//                   Changes:
+//                   • Transit page — new "⚠️ Unverified Transit Items" amber section
+//                     appears directly on the page with a full table (Material, Plant,
+//                     Qty, Value), 5 KPI cards, and a CSV download button. The
+//                     "Verified Transit Items" section below it is clearly labelled.
+//                   • Transit KPI row — "Unverified Transit Items" card sub-label
+//                     updated to "see section below ↓" so users know where to look.
+//                   • Dashboard / Branch / Flow phantom alert banners — now include
+//                     a "Show unverified items ▾" toggle that expands an inline table
+//                     of phantom rows directly in the alert, plus a "Transit page →"
+//                     link. Users no longer have to navigate away just to see the list.
 // =============================================================================
 
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
@@ -1413,6 +1427,10 @@ function getPhantomSummary(df) {
 
 // Renders a dismissible alert banner into the element with given id.
 // Does nothing (clears el) if there are no phantom rows.
+// FIX-PHANTOM-VISIBLE: the alert now includes an expand/collapse button so users
+// can view the unverified items directly inline without navigating away.
+// A unique alertId is derived from containerId so multiple alerts (dash, branch,
+// flow) each have independent expand state.
 function renderPhantomAlert(containerId, df) {
   const el = document.getElementById(containerId);
   if (!el) return;
@@ -1421,6 +1439,35 @@ function renderPhantomAlert(containerId, df) {
     el.innerHTML = "";
     return;
   }
+
+  // Collect the actual phantom rows from this df slice for the inline table
+  const phantomRows = df.filter(r => r._phantomTransitQty > 0);
+  const tableId = containerId + "-inline-tbl";
+
+  const phantomCols = [
+    {key:"Material", label:"Material Code", fmt:(val,r)=>renderMatCode(val,r), raw:true, cellClass:"col-mat-code-wrap"},
+    {key:"Material Description", label:"Material Description", fmt:(val,r)=>renderMatDesc(val,r), raw:true, cellClass:"col-mat-desc-wrap"},
+    {key:"Material Group Name", label:"Material Group"},
+    {key:"Plant Name",          label:"Plant"},
+    {key:"_phantomTransitQty",  label:"Unverified Qty",        fmt:fmtQty, rawKey:"_phantomTransitQty", cellClass:"col-qty"},
+    {key:"_phantomTransitVal",  label:"Unverified Value (ETB)", fmt:fmtETB, rawKey:"_phantomTransitVal", cellClass:"col-val"},
+  ];
+
+  const isTransitPage = (containerId === "transit-phantom-alert");
+  // On transit page, the full phantom section is rendered separately via
+  // renderPhantomTable — so the alert only needs a short "jump to section" link.
+  const actionHtml = isTransitPage
+    ? `<a class="phantom-alert-link" style="white-space:nowrap" onclick="document.getElementById('transit-phantom-section').scrollIntoView({behavior:'smooth'})">View unverified items below ↓</a>`
+    : `<button class="phantom-alert-toggle" id="${tableId}-btn" onclick="(function(){
+        var tbl=document.getElementById('${tableId}');
+        var btn=document.getElementById('${tableId}-btn');
+        var open=tbl.style.display!=='none';
+        tbl.style.display=open?'none':'block';
+        btn.textContent=open?'Show unverified items ▾':'Hide unverified items ▴';
+      })()" style="background:none;border:1px solid var(--amber);color:var(--amber);border-radius:4px;padding:3px 10px;font-size:0.72rem;cursor:pointer;white-space:nowrap">Show unverified items ▾</button>
+      <a class="phantom-alert-link" style="white-space:nowrap" onclick="navigateTo('transit')">Transit page →</a>
+      <div id="${tableId}" style="display:none;margin-top:0.75rem;max-height:320px;overflow-y:auto">${buildTable(phantomRows, phantomCols, () => "row-amber")}</div>`;
+
   el.innerHTML = `
     <div class="phantom-transit-alert">
       <span class="phantom-alert-icon">⚠️</span>
@@ -1428,11 +1475,85 @@ function renderPhantomAlert(containerId, df) {
         <strong>Unverified Transit Stock Excluded</strong>
         <span>${count.toLocaleString()} item${count!==1?"s":""} (${fmtQty(qty)} units · ${fmtETB(val)}) have <em>Stock in Transit</em> but
         lack a <em>Purchasing Document</em> and <em>Supplying Plant</em> in the transit detail file.
-        These items are <strong>not physically confirmed</strong> and have been excluded from all quantities and values shown here.</span>
-        <a class="phantom-alert-link" onclick="navigateTo('transit')">View on Transit page →</a>
+        These items are <strong>excluded from all totals</strong> — verify with your supply team.</span>
+        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-top:0.35rem">
+          ${actionHtml}
+        </div>
       </div>
     </div>`;
 }
+
+// ─── Phantom Transit Dedicated Section (Transit page only) ────────────────
+// Renders the full unverified-items table with KPI summary and download into
+// the #transit-phantom-section container on the Transit page.
+// Called from renderTransit() whenever phantom rows exist.
+function renderPhantomTable(df) {
+  const sectionEl = document.getElementById("transit-phantom-section");
+  if (!sectionEl) return;
+
+  const phantomRows = df.filter(r => r._phantomTransitQty > 0);
+  if (!phantomRows.length || !stockTransitRaw.length) {
+    sectionEl.style.display = "none";
+    sectionEl.innerHTML = "";
+    return;
+  }
+
+  const totalPhantomQty = phantomRows.reduce((s,r) => s + r._phantomTransitQty, 0);
+  const totalPhantomVal = phantomRows.reduce((s,r) => s + r._phantomTransitVal, 0);
+  const uniqMats        = new Set(phantomRows.map(r => r._mappedMaterial || r["Material"])).size;
+  const uniqPlants      = new Set(phantomRows.map(r => r["Plant Name"])).size;
+
+  const phantomCols = [
+    {key:"Material", label:"Material Code", fmt:(val,r)=>renderMatCode(val,r), raw:true, cellClass:"col-mat-code-wrap"},
+    {key:"Material Description", label:"Material Description", fmt:(val,r)=>renderMatDesc(val,r), raw:true, cellClass:"col-mat-desc-wrap"},
+    {key:"Material Group Name",  label:"Material Group"},
+    {key:"Plant",                label:"Plant Code"},
+    {key:"Plant Name",           label:"Plant Name"},
+    {key:"Storage Location",     label:"Storage Location"},
+    {key:"_phantomTransitQty",   label:"Unverified Qty",         fmt:fmtQty, rawKey:"_phantomTransitQty", cellClass:"col-qty"},
+    {key:"_phantomTransitVal",   label:"Unverified Value (ETB)",  fmt:fmtETB, rawKey:"_phantomTransitVal", cellClass:"col-val"},
+  ];
+
+  // Sort by value descending so highest-risk items are at the top
+  const sorted = sortBy(phantomRows, "_phantomTransitVal");
+
+  const dlId = "btn-dl-phantom-transit";
+  sectionEl.style.display = "block";
+  sectionEl.innerHTML = `
+    <div class="phantom-transit-section-wrap" style="
+      border:1px solid #d29922;border-radius:8px;padding:1rem 1.2rem;
+      background:rgba(210,153,34,0.06);margin-bottom:1.5rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.8rem">
+        <div>
+          <div class="section-header" style="margin:0;color:#d29922">⚠️ Unverified Transit Items — No Purchasing Document &amp; Supplying Plant</div>
+          <div style="font-size:0.76rem;color:var(--muted);margin-top:3px">
+            These items appear in the SAP <em>Stock in Transit</em> column but have <strong>no matching entry</strong> in the
+            transit detail file with both a Purchasing Document and Supplying Plant.
+            They are <strong>excluded from all inventory totals</strong> until verified.
+          </div>
+        </div>
+        <button class="dl-btn" id="${dlId}">⬇ Download CSV</button>
+      </div>
+      <div class="kpi-row" style="margin-bottom:0.9rem">
+        ${[
+          ["Unverified Items",    sorted.length.toLocaleString(),    "SAP rows without PO/plant",      "amber"],
+          ["Unique Materials",    uniqMats.toLocaleString(),          "Distinct SKUs",                  "amber"],
+          ["Affected Plants",     uniqPlants.toLocaleString(),        "Locations with unverified stock","amber"],
+          ["Unverified Qty",      fmtQty(totalPhantomQty),           "Units not confirmed",            "amber"],
+          ["Unverified Value",    fmtETB(totalPhantomVal),           "Excluded from totals",           "amber"],
+        ].map(([l,v,s]) => `
+          <div class="kpi-card amber">
+            <div class="kpi-label">${escHtml(l)}</div>
+            <div class="kpi-value">${escHtml(v)}</div>
+            <div class="kpi-sub">${escHtml(s)}</div>
+          </div>`).join("")}
+      </div>
+      <div id="phantom-transit-table-wrap">${buildTable(sorted, phantomCols, () => "row-amber")}</div>
+    </div>`;
+
+  document.getElementById(dlId).onclick = () => downloadCSV(sorted, phantomCols, "unverified_transit_items.csv");
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TRANSIT
@@ -1458,21 +1579,24 @@ function renderTransit() {
   const totalTQ = df.reduce((s,r) => s + getMappedQty(r,"Stock in Transit"), 0);
   const uniqMat = new Set(df.map(r => r._mappedMaterial||r["Material"])).size;
 
-  // Phantom transit summary for transit KPIs — compute from full applyPageFilter set
-  const allTransitDf = applyPageFilter("transit").filter(r => r["Stock in Transit"] > 0 && r["Value of Stock in Transit"] > 0);
-
   renderMappingBanner("transit-mapping-banner");
-  const phantomRows = allTransitDf.filter(r => r._phantomTransitQty > 0);
+  // FIX-PHANTOM-VISIBLE: render the alert banner AND the dedicated unverified-items
+  // table section on the Transit page so users can see and download phantom items.
+  const allTransitDf = applyPageFilter("transit").filter(r => r["Stock in Transit"] > 0 && r["Value of Stock in Transit"] > 0);
+  renderPhantomAlert("transit-phantom-alert", allTransitDf);
+  renderPhantomTable(allTransitDf);
+
   // FIX-MAPPED-COUNT: count unique target materials for phantom KPI
+  const phantomRows  = allTransitDf.filter(r => r._phantomTransitQty > 0);
   const phantomCount = new Set(phantomRows.map(r => r._mappedMaterial || r["Material"])).size;
   const phantomKpiExtra = phantomCount > 0 && stockTransitRaw.length
-    ? [[`Unverified Transit Items`, String(phantomCount), "No PO & Supplying Plant — see Transit Detail section", "red"]]
+    ? [[`Unverified Transit Items`, String(phantomCount), "No PO & Supplying Plant — see section below ↓", "amber"]]
     : [];
 
   setKpis("transit-kpis", [
-    ["Total Transit Value",        fmtETB(totalTV), "Across all plants",  "amber"],
-    ["Total Transit Quantity",     fmtQty(totalTQ), "Units in movement",  "blue"],
-    ["Unique Materials in Transit",String(uniqMat), "Distinct SKUs",      "green"],
+    ["Total Transit Value",        fmtETB(totalTV), "Verified items only",  "amber"],
+    ["Total Transit Quantity",     fmtQty(totalTQ), "Verified items only",  "blue"],
+    ["Unique Materials in Transit",String(uniqMat), "Distinct SKUs",        "green"],
     ...phantomKpiExtra,
   ]);
 
