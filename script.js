@@ -956,7 +956,7 @@ function loadMappingFile(file) {
           const reRender = {
             dashboard: renderDashboard, transit: () => { renderTransit(); renderStockTransitSection(); },
             expiry: renderExpiry, qc: renderQC, branch: renderBranch, flow: renderFlow,
-            preview: renderPreview, home: renderHome, incoming: renderIncoming,
+            preview: renderPreview, home: renderHome, incoming: renderIncomingShelfLife,
           };
           if (reRender[currentPage]) reRender[currentPage]();
         }
