@@ -153,20 +153,38 @@ async function sbSaveDataset(table, rows, statusElId) {
 
 // Fetches a dataset from Supabase and runs it through the given loader
 // function (loadFile / loadIncomingFile / loadTransitFile / loadMappingFile).
+//
+// PERF-FIX: two-phase parallel pagination.
+//   Phase 1 — fetch page 0 to discover the total row count.
+//   Phase 2 — fetch all remaining pages IN PARALLEL (Promise.all), then
+//             reassemble in order so no page is waited on sequentially.
 async function sbLoadDataset(table, loaderFn, filename) {
   try {
-    // Supabase default limit is 1000 rows — paginate to fetch ALL rows
     const PAGE = 1000;
-    let allRows = [];
-    let from = 0;
-    while (true) {
-      const { data, error } = await sb.from(table).select("data").range(from, from + PAGE - 1);
-      if (error) throw error;
-      if (!data || !data.length) break;
-      allRows = allRows.concat(data);
-      if (data.length < PAGE) break;  // last page
-      from += PAGE;
+
+    // Phase 1: first page + get total count
+    const { data: firstPage, error: firstErr, count } =
+      await sb.from(table).select("data", { count: "exact" }).range(0, PAGE - 1);
+    if (firstErr) throw firstErr;
+    if (!firstPage || !firstPage.length) return false;
+
+    let allRows = firstPage;
+
+    // Phase 2: if more pages exist, fetch them all at once
+    if (count && count > PAGE) {
+      const extraFetches = [];
+      for (let from = PAGE; from < count; from += PAGE) {
+        extraFetches.push(
+          sb.from(table).select("data").range(from, from + PAGE - 1)
+        );
+      }
+      const results = await Promise.all(extraFetches);
+      for (const { data, error } of results) {
+        if (error) throw error;
+        if (data && data.length) allRows = allRows.concat(data);
+      }
     }
+
     if (!allRows.length) return false;
     loaderFn(_sbArrayToFakeFile(allRows.map(d => d.data), filename));
     return true;
@@ -177,10 +195,15 @@ async function sbLoadDataset(table, loaderFn, filename) {
 }
 
 async function sbLoadAllDatasets() {
-  await sbLoadDataset("inventory", loadFile,         "inventory.xlsx");
-  await sbLoadDataset("incoming",  loadIncomingFile, "incoming.xlsx");
-  await sbLoadDataset("transit",   loadTransitFile,  "transit.xlsx");
-  await sbLoadDataset("mapping",   loadMappingFile,  "mapping.xlsx");
+  // PERF-FIX: load all four datasets IN PARALLEL — they are fully independent.
+  // Previously sequential awaits caused each dataset to wait for the previous
+  // one to finish, multiplying total load time by the number of datasets.
+  await Promise.all([
+    sbLoadDataset("inventory", loadFile,         "inventory.xlsx"),
+    sbLoadDataset("incoming",  loadIncomingFile, "incoming.xlsx"),
+    sbLoadDataset("transit",   loadTransitFile,  "transit.xlsx"),
+    sbLoadDataset("mapping",   loadMappingFile,  "mapping.xlsx"),
+  ]);
 }
 
 // ── AUTH ─────────────────────────────────────────────────────────────────
@@ -201,49 +224,49 @@ function sbApplyAuthUI() {
   if (overlay) overlay.style.display = currentUser ? "none" : "flex";
 }
 
-async function sbInitAuth() {
-  // Listen for auth state changes (handles refresh token restore)
-  sb.auth.onAuthStateChange(async (event, session) => {
-    const user = session?.user || null;
-    // Only act on sign-in events or initial session restore
-    if ((event === "SIGNED_IN" || event === "INITIAL_SESSION") && user) {
-      // Avoid double-loading if already loaded for this user
-      if (currentUser && currentUser.id === user.id) return;
-      currentUser = user;
-      isAdmin     = await sbCheckAdmin(currentUser.id);
-      sbApplyAuthUI();
-      await sbLoadAllDatasets();
-      if (!isAdmin) setTimeout(() => renderPage("dashboard"), 400);
-    } else if (event === "SIGNED_OUT") {
-      currentUser = null;
-      isAdmin     = false;
-      sbApplyAuthUI();
-    }
-  });
+// Tracks whether a load is already in progress to prevent double-loads.
+let _sbLoadingUserId = null;
 
-  // Also try getSession immediately (for faster load if session already available)
-  const { data: { session } } = await sb.auth.getSession();
-  currentUser = session?.user || null;
-  isAdmin     = currentUser ? await sbCheckAdmin(currentUser.id) : false;
-  sbApplyAuthUI();
-  if (currentUser) {
-    await sbLoadAllDatasets();
-    if (!isAdmin) setTimeout(() => renderPage("dashboard"), 400);
-  }
-}
-
-async function sbLogin(email, password) {
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  if (error) throw error;
-  currentUser = data.user;
+async function _sbHandleSignIn(user) {
+  // Guard: if already loading or already loaded for this exact user, skip.
+  if (_sbLoadingUserId === user.id) return;
+  _sbLoadingUserId = user.id;
+  currentUser = user;
   isAdmin     = await sbCheckAdmin(currentUser.id);
   sbApplyAuthUI();
   await sbLoadAllDatasets();
   if (!isAdmin) setTimeout(() => renderPage("dashboard"), 400);
 }
 
+async function sbInitAuth() {
+  // Listen for auth state changes (handles refresh-token restore on page reload).
+  // NOTE: onAuthStateChange fires INITIAL_SESSION synchronously before getSession()
+  // below resolves, so we rely solely on the listener and skip the getSession() call
+  // to avoid double-loading datasets.
+  sb.auth.onAuthStateChange(async (event, session) => {
+    const user = session?.user || null;
+    if ((event === "SIGNED_IN" || event === "INITIAL_SESSION") && user) {
+      await _sbHandleSignIn(user);
+    } else if (event === "SIGNED_OUT") {
+      _sbLoadingUserId = null;
+      currentUser = null;
+      isAdmin     = false;
+      sbApplyAuthUI();
+    }
+  });
+}
+
+async function sbLogin(email, password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  // NOTE: signInWithPassword also fires a SIGNED_IN event via onAuthStateChange.
+  // _sbHandleSignIn's guard (_sbLoadingUserId) prevents the double-load.
+  await _sbHandleSignIn(data.user);
+}
+
 async function sbLogout() {
   await sb.auth.signOut();
+  _sbLoadingUserId = null;
   currentUser = null;
   isAdmin     = false;
   sbApplyAuthUI();
