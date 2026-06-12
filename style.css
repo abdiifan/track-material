@@ -834,3 +834,5 @@ body.not-admin #mappingFileStatus,
 body.not-admin .sidebar-divider {
   display: none !important;
 }
+
+/* Hide upload controls entirely for non-admin users (handled above) */
