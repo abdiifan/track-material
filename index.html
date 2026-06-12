@@ -14,8 +14,24 @@
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.26.0/plotly.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+
+<!-- ═══════════════════════════ LOGIN OVERLAY ═══════════════════════════ -->
+<div id="login-overlay">
+  <div id="login-box">
+    <div class="login-brand">
+      <img src="epss-logo.png" alt="EPSS Logo" />
+      <div class="login-title">Stock-Multiple</div>
+      <div class="login-sub">Sign in to continue</div>
+    </div>
+    <input type="email" id="login-email" placeholder="Email" autocomplete="username" />
+    <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+    <button id="login-btn" type="button">Sign In</button>
+    <div id="login-error"></div>
+  </div>
+</div>
 
 
 <!-- ═══════════════════════════ SIDEBAR ═══════════════════════════ -->
@@ -26,6 +42,11 @@
       <div class="brand-name">Stock-Multiple</div>
       <div class="brand-sub">INVENTORY MANAGEMENT</div>
     </div>
+  </div>
+
+  <div id="auth-bar">
+    <span id="auth-status">Not signed in</span>
+    <button id="logout-btn" type="button">Sign Out</button>
   </div>
 
   <nav id="nav">
@@ -518,6 +539,12 @@
             <option value="yellow">🟡 Yellow (1.5–2yr at receipt)</option>
             <option value="red">🔴 Red (&lt;1.5yr at receipt)</option>
 
+          </select>
+        </div>
+        <div>
+          <label class="isl-filter-label">Material</label>
+          <select id="isl-filter-material" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;min-width:180px">
+            <option value="">All Materials</option>
           </select>
         </div>
         <button type="button" class="apply-btn small" id="isl-filter-apply">Apply</button>
