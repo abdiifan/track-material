@@ -396,8 +396,7 @@ function loadFile(file) {
         hideLanding();
         document.getElementById("global-search-bar").style.display = "block";
         populateAllFilters();
-        // Re-render home KPIs then switch to dashboard
-        renderPage("home");
+        // Switch to dashboard after file load
         renderPage(currentPage === "home" ? "dashboard" : currentPage);
       } catch (err) {
         showError(`Could not read Excel file: ${err.message}`);
@@ -732,7 +731,6 @@ function renderDashboard() {
   const df = applyPageFilter("dashboard");
 
   renderPhantomAlert("dash-phantom-alert", df);
-  renderMappingBanner("dash-mapping-banner");
 
   // FIX-TRANSIT-NODOC: exclude transit items lacking both Purchasing Document
   // AND Supplying Plant — these are physically unconfirmed (phantom) and must
@@ -1579,7 +1577,6 @@ function renderTransit() {
   const totalTQ = df.reduce((s,r) => s + getMappedQty(r,"Stock in Transit"), 0);
   const uniqMat = new Set(df.map(r => r._mappedMaterial||r["Material"])).size;
 
-  renderMappingBanner("transit-mapping-banner");
   // FIX-PHANTOM-VISIBLE: render the alert banner AND the dedicated unverified-items
   // table section on the Transit page so users can see and download phantom items.
   const allTransitDf = applyPageFilter("transit").filter(r => r["Stock in Transit"] > 0 && r["Value of Stock in Transit"] > 0);
@@ -1691,7 +1688,6 @@ function clearTransitSearch() {
 // ═══════════════════════════════════════════════════════════════════════════
 function renderExpiry() {
   const baseDf  = applyPageFilter("expiry");
-  renderMappingBanner("expiry-mapping-banner");
   const months  = parseInt(document.querySelector('input[name="expWin"]:checked')?.value || 6);
   const today   = new Date();
   const cutoff  = new Date(today); cutoff.setMonth(cutoff.getMonth() + months);
@@ -2014,8 +2010,6 @@ function renderQC() {
   const rawFiltered = applyPageFilter("qc").filter(r => r["Stock in Quality Inspection"] > 0);
   const df          = aggregateByMappedMaterial(rawFiltered).filter(r => r["Stock in Quality Inspection"] > 0);
 
-  renderMappingBanner("qc-mapping-banner");
-
   const totalQCVal = df.reduce((s,r) => s + r["Value of Stock in Quality Inspection"], 0);
   const totalQCQty = df.reduce((s,r) => s + r["Stock in Quality Inspection"], 0);
   setKpis("qc-kpis", [
@@ -2065,7 +2059,6 @@ function renderBranch() {
   const baseDf = applyPageFilter("branch");
 
 
-  renderMappingBanner("branch-mapping-banner");
   const plants = [...new Set(baseDf.map(r => String(r["Plant"]).toUpperCase()))];
   // BUG-FIX-6: centralCode was computed but never read anywhere — removed dead variable.
   // All downstream logic uses centralName (the display name).
@@ -2397,9 +2390,6 @@ function renderBranch() {
 function renderFlow() {
   const df = applyPageFilter("flow");
 
-
-  renderMappingBanner("flow-mapping-banner");
-
   // FIX-TRANSIT-NODOC: exclude transit items lacking both Purchasing Document
   // AND Supplying Plant from Flow page KPIs and totals.
   const transitVal = df.reduce((s,r) => s + getVerifiedTransitVal(r), 0);
@@ -2523,6 +2513,7 @@ function renderFlow() {
 // ═══════════════════════════════════════════════════════════════════════════
 function renderPreview() {
   filtDf = getReconciledBase();
+  renderMappingBanner("preview-mapping-banner");
   populatePreviewFilters();
   renderPreviewTable();
 }
@@ -3447,7 +3438,6 @@ function renderIncomingShelfLife() {
 }
 
 const PAGE_RENDERERS = {
-  home:      renderHome,
   dashboard: renderDashboard,
   transit:   renderTransit,
   expiry:    renderExpiry,
@@ -3459,9 +3449,9 @@ const PAGE_RENDERERS = {
 };
 
 function renderPage(id) {
-  // Home page works even before a file is loaded
-  // Incoming Shelf Life works as long as incomingRaw is loaded (its own file)
-  if (id !== "home" && id !== "incoming" && !rawDf.length) return;
+  // Home page removed — redirect to dashboard
+  if (id === "home") id = "dashboard";
+  if (id !== "incoming" && !rawDf.length) return;
   if (id === "incoming" && !rawDf.length && !incomingRaw.length) {
     // Show the page shell but with the "no file" message
     currentPage = id;
@@ -3495,8 +3485,7 @@ function renderPage(id) {
 // EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════════════════
 document.addEventListener("DOMContentLoaded", () => {
-  // Show Home page immediately (works without data)
-  renderPage("home");
+  // Dashboard is the default page (Home removed)
 
   // Nav
   document.querySelectorAll(".nav-btn[data-page]").forEach(btn => {
