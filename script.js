@@ -196,12 +196,29 @@ async function sbSaveDataset(table, rows, statusElId) {
   if (syncEl) syncEl.innerHTML = `☁️ Syncing to database…`;
   try {
     await sb.from(table).delete().neq("id", -1);
-    const CHUNK = 500;
+    const CHUNK = 1000;
+    const chunks = [];
     for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK).map(r => ({ uploaded_by: currentUser.id, data: r }));
-      const { error } = await sb.from(table).insert(chunk);
-      if (error) throw error;
+      chunks.push(rows.slice(i, i + CHUNK).map(r => ({ uploaded_by: currentUser.id, data: r })));
     }
+    // Insert chunks with limited concurrency (avoids overwhelming the API
+    // while still being much faster than one-at-a-time sequential awaits)
+    const CONCURRENCY = 4;
+    let nextIdx = 0;
+    let firstError = null;
+    async function worker() {
+      while (nextIdx < chunks.length) {
+        const idx = nextIdx++;
+        const { error } = await sb.from(table).insert(chunks[idx]);
+        if (error && !firstError) firstError = error;
+        if (syncEl && !firstError) {
+          const done = Math.min((idx + 1) * CHUNK, rows.length);
+          syncEl.innerHTML = `☁️ Syncing to database… (${done.toLocaleString()} / ${rows.length.toLocaleString()})`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
+    if (firstError) throw firstError;
     if (syncEl) syncEl.innerHTML = `<span style="color:var(--green)">✓ Synced to database (${rows.length.toLocaleString()} rows)</span>`;
   } catch (err) {
     console.error(`Supabase save error (${table}):`, err);
@@ -255,7 +272,10 @@ async function sbInitAuth() {
   currentUser = session?.user || null;
   isAdmin     = currentUser ? await sbCheckAdmin(currentUser.id) : false;
   sbApplyAuthUI();
-  if (currentUser) sbLoadAllDatasets();
+  if (currentUser) {
+    await sbLoadAllDatasets();
+    if (!isAdmin) setTimeout(() => renderPage("preview"), 400);
+  }
 }
 
 async function sbLogin(email, password) {
@@ -264,7 +284,8 @@ async function sbLogin(email, password) {
   currentUser = data.user;
   isAdmin     = await sbCheckAdmin(currentUser.id);
   sbApplyAuthUI();
-  sbLoadAllDatasets();
+  await sbLoadAllDatasets();
+  if (!isAdmin) setTimeout(() => renderPage("preview"), 400);
 }
 
 async function sbLogout() {
