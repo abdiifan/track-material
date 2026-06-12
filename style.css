@@ -74,7 +74,7 @@ body { display: flex; }
 .feature-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 1.2rem; font-size: 0.78rem; color: var(--muted); }
 
 /* ── PAGE HEADERS ── */
-.page-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.8rem; gap: 1rem; flex-wrap: wrap; }
+.page-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.1rem; gap: 1rem; flex-wrap: wrap; padding-bottom: 0.9rem; border-bottom: 1px solid var(--border); }
 .page-title    { color: var(--blue); font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 0.2rem; }
 .page-subtitle { color: var(--dim); font-size: 0.8rem; }
 .page-actions  { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
@@ -84,8 +84,8 @@ body { display: flex; }
 /* ── FILTER BAR ── */
 .filter-bar {
   display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 0.65rem 0.9rem; margin-bottom: 1.4rem;
+  background: var(--bg); border: 1px solid var(--border2); border-radius: 8px;
+  padding: 0.65rem 0.9rem; margin-bottom: 1.2rem;
   position: relative;
 }
 /* Apply / Clear buttons must sit above the ms-dropdown (z-index:300) */
@@ -100,23 +100,34 @@ body { display: flex; }
 }
 
 /* ── KPI CARDS ── */
-.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.6rem; }
+.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.85rem; margin-bottom: 1.6rem; }
 .kpi-card {
-  background: linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
-  border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem 1.4rem;
+  background: var(--surface2);
+  border: 1px solid var(--border2); border-radius: 12px; padding: 1.1rem 1.3rem;
   position: relative; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s;
 }
 .kpi-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-.kpi-card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; border-radius: 12px 0 0 12px; }
+.kpi-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 12px 12px 0 0; }
 .kpi-card.blue::before   { background: var(--blue); }
 .kpi-card.green::before  { background: var(--green); }
 .kpi-card.amber::before  { background: var(--amber); }
 .kpi-card.red::before    { background: var(--red); }
 .kpi-card.purple::before { background: var(--purple); }
 .kpi-card.muted::before  { background: var(--muted); }
-.kpi-label { color: var(--muted); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.4rem; }
-.kpi-value { color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 1.45rem; font-weight: 600; line-height: 1; margin-bottom: 0.25rem; }
-.kpi-sub   { color: var(--dim); font-size: 0.68rem; }
+.kpi-label { color: var(--muted); font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.11em; margin-bottom: 0.45rem; }
+.kpi-value { color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 1.25rem; font-weight: 600; line-height: 1.15; margin-bottom: 0.3rem; word-break: break-all; }
+.kpi-sub   { color: var(--dim); font-size: 0.67rem; }
+
+/* Page-specific KPI column overrides */
+#dash-kpis     { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+#transit-kpis  { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+#expiry-kpis   { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#home-kpis     { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-top: 0.2rem; margin-bottom: 1.8rem; }
+/* Section label above home KPI row */
+.home-kpis-label {
+  font-size: 0.65rem; font-weight: 700; color: var(--blue);
+  letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.65rem; margin-top: 0.2rem;
+}
 
 /* ── ALERTS ── */
 .alert-info    { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 0.65rem 0.9rem; color: var(--blue); font-size: 0.78rem; margin: 0.5rem 0; }
