@@ -1390,7 +1390,8 @@ function renderTransit() {
 
   renderMappingBanner("transit-mapping-banner");
   const phantomRows = allTransitDf.filter(r => r._phantomTransitQty > 0);
-  const phantomCount = phantomRows.length;
+  // FIX-MAPPED-COUNT: count unique target materials for phantom KPI
+  const phantomCount = new Set(phantomRows.map(r => r._mappedMaterial || r["Material"])).size;
   const phantomKpiExtra = phantomCount > 0 && stockTransitRaw.length
     ? [[`Unverified Transit Items`, String(phantomCount), "No PO & Supplying Plant — see Transit Detail section", "red"]]
     : [];
@@ -1505,12 +1506,18 @@ function renderExpiry() {
   const expiredWithStock = expired.filter(r => (r["Unrestricted Stock"] || 0) > 0);
   const expiredZeroQty   = expired.length - expiredWithStock.length;
 
+  // FIX-MAPPED-COUNT: count unique target materials so that multiple source codes
+  // mapping to the same target material are counted as one item, not many.
+  const getMatKey = r => r._mappedMaterial || r["Material"];
+  const expiringUniq      = new Set(expiring.map(getMatKey)).size;
+  const expiredStockUniq  = new Set(expiredWithStock.map(getMatKey)).size;
+
   setKpis("expiry-kpis", [
-    ["Expiring in Window", String(expiring.length),       `Items within next ${months} months`,             "amber"],
-    // FIX BUG-4: use expiredWithStock.length to match what the table shows
-    ["Already Expired",   String(expiredWithStock.length),"Items with stock on hand requiring action",      "red"],
-    ["At-Risk Value",     fmtETB(expiring.reduce((s,r) => s+r["Value of Unrestricted Stock"],0)),           "Unrestricted stock value","purple"],
-    ["At-Risk Quantity",  fmtQty(expiring.reduce((s,r) => s+r["Unrestricted Stock"],0)),                   "Units expiring soon",     "amber"],
+    ["Expiring in Window", String(expiringUniq),      `Items within next ${months} months`,             "amber"],
+    // FIX BUG-4: use expiredWithStock count; FIX-MAPPED-COUNT: unique target materials
+    ["Already Expired",   String(expiredStockUniq),  "Items with stock on hand requiring action",      "red"],
+    ["At-Risk Value",     fmtETB(expiring.reduce((s,r) => s+getMappedVal(r,"Value of Unrestricted Stock"),0)), "Unrestricted stock value","purple"],
+    ["At-Risk Quantity",  fmtQty(expiring.reduce((s,r) => s+getMappedQty(r,"Unrestricted Stock"),0)),          "Units expiring soon",     "amber"],
   ]);
 
   if (expiring.length) {
@@ -2511,18 +2518,20 @@ function renderHome() {
 
   const today      = new Date();
   const in90       = new Date(); in90.setDate(in90.getDate() + 90);
-  const expiryCount = base.filter(r =>
+  const expiringRows90 = base.filter(r =>
     r._expiry instanceof Date && !isNaN(r._expiry) &&
     r._expiry >= today && r._expiry <= in90 &&
     (r["Unrestricted Stock"] || 0) > 0
-  ).length;
+  );
+  // FIX-MAPPED-COUNT: count unique target materials so mapped source codes count as one
+  const expiryCount = new Set(expiringRows90.map(r => r._mappedMaterial || r["Material"])).size;
 
   setKpis("home-kpis", [
     ["Total Inventory Value",    fmtETB(totalVal),   `${fmtQty(totalQty)} units across all plants`,      "blue"],
     ["Stock in Transit",         fmtETB(transitVal), `Moving between locations`,                          "amber"],
     ["In Quality Inspection",    fmtETB(qcVal),      `Pending QC release`,                               "red"],
     ["Expiring within 90 Days",  expiryCount.toLocaleString() + " items", `Requiring urgent action`,     "purple"],
-    ["Unique Materials",         new Set(base.map(r=>r["Material"])).size.toLocaleString(), `Across ${new Set(base.map(r=>r["Plant"])).size} plants`, "green"],
+    ["Unique Materials",         new Set(base.map(r=>r._mappedMaterial||r["Material"])).size.toLocaleString(), `Across ${new Set(base.map(r=>r["Plant"])).size} plants`, "green"],
   ]);
 }
 
