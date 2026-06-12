@@ -1,3 +1,106 @@
+// =============================================================================
+// PharmaTrack v2 — Pharmaceutical Inventory Management System
+// =============================================================================
+// Fixes applied vs v8 (script__22_.js baseline):
+//  BUG-1  Preview download now exports full filtered dataset (not 500-row slice)
+//  BUG-2  Chain/circular reconciliation rules detected and blocked on save
+//  BUG-3  pageFilters reset on new file upload so stale plant/MG never persists
+//  BUG-4  "Already Expired" KPI now counts only stock-qty > 0 rows (matches table)
+//  BUG-5  Target materials blocked from being selected as a new source
+//  BUG-6  QC page no longer drops items with QC qty > 0 but zero ETB value
+//  BUG-7  rpSetSelected chip close button uses addEventListener, not inline onclick
+//  BUG-8  String expiry dates parsed as LOCAL midnight not UTC (timezone fix)
+//  BUG-9  CSV tab-character cells now quoted correctly
+//  BUG-10 groupBy empty-string bucket renamed to "(Blank)" for chart clarity
+//  PERF-1 File size warning before parse (>25 MB)
+//  ROBUST localStorage schema validated on load; corrupt entries discarded
+//  ROBUST Column header matching is now case-insensitive
+//  ROBUST Total Qty removed from QTY_COLS scaling (was scaled then overwritten)
+//  ROBUST Conversion factor stored with 9dp rounding to suppress float drift
+//
+// Specialist review fixes (v2 → v2.1):
+//  FIX-R1  aggregateByMaterial: removed duplicate "Value of Stock in Quality
+//          Inspection" entry in VAL_COLS that caused double-counting of QC value
+//          on QC page and Branch Comparison.
+//  FIX-R2  Reconciliation mapping file parser: column indices corrected to match
+//          documented format (source, desc, unit, factor, target, desc, unit).
+//          Factor now read from index 3; target from index 4; desc from index 5.
+//  FIX-R3  Reconciliation cache token strengthened: now includes a lightweight
+//          djb2 hash of all material codes so same-size file swaps correctly
+//          bust the cache.
+//  FIX-R4  renderTransit: removed redundant isNonMedical*/isExcluded* re-filters
+//          (rawDf is already fully filtered at parse time). Consistent with all
+//          other render* functions.
+//  FIX-R5  pageFilters: removed unused "preview" key (filtDf/preview uses its
+//          own <select multiple> UI; the pageFilters slot was dead state).
+//  FIX-R6  Global search and transit search panels now include CSV + Excel export
+//          buttons so users with >200/500 results have an export path.
+//  FIX-R7  Branch comparison: replaced native <select multiple> with the standard
+//          buildMultiSelect checkbox-dropdown for UX consistency.
+//  FIX-R8  loadTransitFile: now also applies isNonMedicalGroup filter when the
+//          column is present, consistent with main file parsing.
+//  FIX-R9  filters.js: isMedicalCode is now used inside isNonMedicalCode as its
+//          positive counterpart (DRY); dead export warning resolved.
+//  FIX-R10 Flow page "Material Inventory Flow Lookup" description corrected
+//          (was copy-pasted from QC section and incorrectly said "QC stock").
+//  FIX-R11 refreshReconcileGroupsList: delete listener now uses { once: true }
+//          to prevent double-fire on rapid successive calls.
+//  FIX-R12 localStorage: old versioned keys (v1, v2) cleaned up on startup.
+//
+// Storage-location exclusion & phantom transit hardening (v2.1 → v2.2):
+//  FIX-EXCL-SLOC   Materials excluded by storage location (ADG1, ARG1, ASG1 …)
+//                   are now also stripped from stockTransitRaw so they cannot
+//                   appear anywhere on the site — not even in the transit detail
+//                   section.  Cross-filter applied both in loadTransitFile (when
+//                   transit file loads after main) and in recomputePhantomTransit
+//                   (when main file loads after transit).
+//  FIX-PHANTOM-HIDE Phantom transit items (Stock in Transit > 0 but no matching
+//                   Purchasing Document AND Supplying Plant in the transit file)
+//                   are now hidden from every page except the "Stock in Transit
+//                   Detail" section (lower half of the Transit page).  Previously
+//                   they appeared with a warning badge in the main transit table,
+//                   in Global Search, in Branch Comparison totals, and in the
+//                   Inventory Flow transfer / reorder tables.  Now:
+//                   • renderTransit main table   — phantom rows excluded
+//                   • Global search transit      — phantom rows excluded
+//                   • Branch comparison aggMap   — phantom Transit/TransitQty subtracted
+//                   • Branch comparison matPlantMap — same subtraction
+//                   • Flow transferRows          — phantom rows excluded
+//                   • Flow reorderItems          — only non-phantom transit counts
+//                   The transit KPI card still shows a count so operators know
+//                   unverified items exist; the detail is in the Transit Detail
+//                   section where those rows remain visible.
+//
+// Transit no-doc exclusion — Dashboard / Home / Flow hardening (v2.2 → v2.3):
+//  FIX-TRANSIT-NODOC Transit items that do NOT have BOTH a Supplying Plant AND
+//                   a Purchasing Document in the transit detail file are now fully
+//                   excluded from every KPI and aggregate total on:
+//                   • Home page      — "Stock in Transit" KPI card
+//                   • Dashboard      — "Stock in Transit Value" KPI card and all
+//                                     Total Inventory Value / Total Qty aggregates
+//                   • Inventory Flow — "In Transit (Inbound)" KPI card and all
+//                                     Total Inventory / Total Qty aggregates
+//                   Two new helper functions (getVerifiedTransitQty /
+//                   getVerifiedTransitVal) encapsulate the phantom subtraction
+//                   logic and are used everywhere transit figures are surfaced.
+//                   Branch Comparison already applied this exclusion (FIX-PHANTOM-BRANCH
+//                   from v2.2); this fix brings Dashboard, Home, and Flow in line.
+//
+//  FIX-PHANTOM-VISIBLE Unverified transit items (phantom) are now fully visible to
+//                   users instead of only being mentioned in an alert banner.
+//                   Changes:
+//                   • Transit page — new "⚠️ Unverified Transit Items" amber section
+//                     appears directly on the page with a full table (Material, Plant,
+//                     Qty, Value), 5 KPI cards, and a CSV download button. The
+//                     "Verified Transit Items" section below it is clearly labelled.
+//                   • Transit KPI row — "Unverified Transit Items" card sub-label
+//                     updated to "see section below ↓" so users know where to look.
+//                   • Dashboard / Branch / Flow phantom alert banners — now include
+//                     a "Show unverified items ▾" toggle that expands an inline table
+//                     of phantom rows directly in the alert, plus a "Transit page →"
+//                     link. Users no longer have to navigate away just to see the list.
+// =============================================================================
+
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
 const REQUIRED_COLUMNS = [
   "Material","Material Description","Plant","Plant Name",
@@ -10,16 +113,28 @@ const REQUIRED_COLUMNS = [
   "Value of Unrestricted Stock",
 ];
 
-const COLORWAY = ["#58a6ff","#3fb950","#d29922","#f85149","#a371f7","#79c0ff","#56d364","#e3b341","#ff7b72","#d2a8ff","#ffa657","#70d9a0"];
+const COLORWAY = ["#3a8fd4","#2e9e5a","#c47f17","#d94040","#8763cc","#5cbfdb","#4db87a","#e09b2d","#e86060","#a78bde","#59b8f5","#70ce94"];
 
 // NOTE: Exclusion rules (isNonMedicalCode, isNonMedicalGroup) are loaded from
 // filters.js which MUST be included before this script in the HTML.
+// ── THEME-AWARE PLOTLY LAYOUT ─────────────────────────────────────────────
+// Reads CSS vars at call time so chart colours match the active theme.
+function getPlotlyThemeColors() {
+  const s = getComputedStyle(document.documentElement);
+  const get = v => s.getPropertyValue(v).trim();
+  return {
+    grid:   get('--border')  || '#1e2e3d',
+    muted:  get('--muted')   || '#7a97b0',
+    bg:     'rgba(0,0,0,0)',
+  };
+}
+
 const PLOTLY_LAYOUT = {
   paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-  font: { family: "IBM Plex Sans", color: "#8b949e", size: 12 },
-  xaxis: { gridcolor: "#21262d", zerolinecolor: "#21262d", tickfont: { color: "#8b949e" } },
-  yaxis: { gridcolor: "#21262d", zerolinecolor: "#21262d", tickfont: { color: "#8b949e" } },
-  legend: { bgcolor: "rgba(0,0,0,0)", font: { color: "#8b949e" } },
+  font: { family: "Inter, IBM Plex Sans, sans-serif", color: "#7a97b0", size: 12 },
+  xaxis: { gridcolor: "#1e2e3d", zerolinecolor: "#1e2e3d", tickfont: { color: "#7a97b0" } },
+  yaxis: { gridcolor: "#1e2e3d", zerolinecolor: "#1e2e3d", tickfont: { color: "#7a97b0" } },
+  legend: { bgcolor: "rgba(0,0,0,0)", font: { color: "#7a97b0" } },
   margin: { l: 20, r: 20, t: 40, b: 40 },
   colorway: COLORWAY,
 };
@@ -613,11 +728,19 @@ function downloadCSV(data, cols, filename) {
 
 // ── PLOTLY LAYOUT MERGE ────────────────────────────────────────────────────
 function pl(extra={}) {
-  return Object.assign({}, PLOTLY_LAYOUT, extra, {
-    xaxis:  Object.assign({}, PLOTLY_LAYOUT.xaxis,  extra.xaxis  || {}),
-    yaxis:  Object.assign({}, PLOTLY_LAYOUT.yaxis,  extra.yaxis  || {}),
-    legend: Object.assign({}, PLOTLY_LAYOUT.legend, extra.legend || {}),
-    margin: Object.assign({}, PLOTLY_LAYOUT.margin, extra.margin || {}),
+  const tc = getPlotlyThemeColors();
+  const base = {
+    ...PLOTLY_LAYOUT,
+    font:   { ...PLOTLY_LAYOUT.font,   color: tc.muted },
+    xaxis:  { ...PLOTLY_LAYOUT.xaxis,  gridcolor: tc.grid, zerolinecolor: tc.grid, tickfont: { color: tc.muted } },
+    yaxis:  { ...PLOTLY_LAYOUT.yaxis,  gridcolor: tc.grid, zerolinecolor: tc.grid, tickfont: { color: tc.muted } },
+    legend: { ...PLOTLY_LAYOUT.legend, font: { color: tc.muted } },
+  };
+  return Object.assign({}, base, extra, {
+    xaxis:  Object.assign({}, base.xaxis,  extra.xaxis  || {}),
+    yaxis:  Object.assign({}, base.yaxis,  extra.yaxis  || {}),
+    legend: Object.assign({}, base.legend, extra.legend || {}),
+    margin: Object.assign({}, base.margin, extra.margin || {}),
   });
 }
 
