@@ -180,8 +180,20 @@ function _sbArrayToFakeFile(rows, filename) {
 
 // Saves a freshly-parsed dataset to Supabase, replacing whatever was there
 // before. Admin-only (RLS also enforces this server-side).
-async function sbSaveDataset(table, rows) {
+async function sbSaveDataset(table, rows, statusElId) {
   if (!isAdmin || !currentUser) return;
+  const statusEl = statusElId ? document.getElementById(statusElId) : null;
+  const syncEl = statusEl ? (() => {
+    let el = statusEl.querySelector(".sb-sync-status");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "sb-sync-status status-name";
+      statusEl.appendChild(el);
+    }
+    return el;
+  })() : null;
+
+  if (syncEl) syncEl.innerHTML = `☁️ Syncing to database…`;
   try {
     await sb.from(table).delete().neq("id", -1);
     const CHUNK = 500;
@@ -190,9 +202,11 @@ async function sbSaveDataset(table, rows) {
       const { error } = await sb.from(table).insert(chunk);
       if (error) throw error;
     }
+    if (syncEl) syncEl.innerHTML = `<span style="color:var(--green)">✓ Synced to database (${rows.length.toLocaleString()} rows)</span>`;
   } catch (err) {
     console.error(`Supabase save error (${table}):`, err);
-    alert(`⚠ Saved locally, but could not sync to the database: ${err.message}`);
+    if (syncEl) syncEl.innerHTML = `<span style="color:var(--red)">✗ Sync failed: ${escHtml(err.message)}</span>`;
+    else alert(`⚠ Saved locally, but could not sync to the database: ${err.message}`);
   }
 }
 
@@ -465,7 +479,7 @@ function loadFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { showError("The uploaded file contains no data."); return; }
-        sbSaveDataset("inventory", data);
+        sbSaveDataset("inventory", data, "fileStatus");
 
         const trimmed = data.map(row => {
           const r = {};
@@ -965,7 +979,7 @@ function loadTransitFile(file) {
           statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Empty file</div>`;
           return;
         }
-        sbSaveDataset("transit", data);
+        sbSaveDataset("transit", data, "transitFileStatus");
 
         // Trim all column headers
         const trimmed = data.map(row => {
@@ -1070,7 +1084,7 @@ function loadMappingFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Mapping file is empty.</div>`; return; }
-        sbSaveDataset("mapping", data);
+        sbSaveDataset("mapping", data, "mappingFileStatus");
 
         // Case-insensitive column lookup
         const colMap = {};
@@ -2895,7 +2909,7 @@ function loadIncomingFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">⚠ File empty</div>`; return; }
-        sbSaveDataset("incoming", data);
+        sbSaveDataset("incoming", data, "incomingFileStatus");
 
         const trimmed = data.map(row => {
           const r = {};
