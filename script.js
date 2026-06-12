@@ -70,6 +70,21 @@
 //                   The transit KPI card still shows a count so operators know
 //                   unverified items exist; the detail is in the Transit Detail
 //                   section where those rows remain visible.
+//
+// Transit no-doc exclusion — Dashboard / Home / Flow hardening (v2.2 → v2.3):
+//  FIX-TRANSIT-NODOC Transit items that do NOT have BOTH a Supplying Plant AND
+//                   a Purchasing Document in the transit detail file are now fully
+//                   excluded from every KPI and aggregate total on:
+//                   • Home page      — "Stock in Transit" KPI card
+//                   • Dashboard      — "Stock in Transit Value" KPI card and all
+//                                     Total Inventory Value / Total Qty aggregates
+//                   • Inventory Flow — "In Transit (Inbound)" KPI card and all
+//                                     Total Inventory / Total Qty aggregates
+//                   Two new helper functions (getVerifiedTransitQty /
+//                   getVerifiedTransitVal) encapsulate the phantom subtraction
+//                   logic and are used everywhere transit figures are surfaced.
+//                   Branch Comparison already applied this exclusion (FIX-PHANTOM-BRANCH
+//                   from v2.2); this fix brings Dashboard, Home, and Flow in line.
 // =============================================================================
 
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
@@ -705,15 +720,19 @@ function renderDashboard() {
   renderPhantomAlert("dash-phantom-alert", df);
   renderMappingBanner("dash-mapping-banner");
 
-  const totalVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
-  const transitVal = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Transit"), 0);
+  // FIX-TRANSIT-NODOC: exclude transit items lacking both Purchasing Document
+  // AND Supplying Plant — these are physically unconfirmed (phantom) and must
+  // not inflate Dashboard totals.
+  const transitVal = df.reduce((s,r) => s + getVerifiedTransitVal(r), 0);
+  const transitQty = df.reduce((s,r) => s + getVerifiedTransitQty(r), 0);
   const qcVal      = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
   const availVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock"), 0);
-  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock") + getMappedQty(r,"Stock in Transit") + getMappedQty(r,"Stock in Quality Inspection"), 0);
+  const totalVal   = availVal + transitVal + qcVal;
+  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock"), 0) + transitQty + df.reduce((s,r) => s + getMappedQty(r,"Stock in Quality Inspection"), 0);
 
   setKpis("dash-kpis", [
     ["Total Inventory Value",    fmtETB(totalVal),   `${fmtQty(totalQty)} total units`,      "blue"],
-    ["Stock in Transit Value",   fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Transit"),0))} units`, "amber"],
+    ["Stock in Transit Value",   fmtETB(transitVal), `${fmtQty(transitQty)} units`, "amber"],
     ["Value in QC",              fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Quality Inspection"),0))} units`, "red"],
     ["Available (Unrestricted)", fmtETB(availVal),   `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Unrestricted Stock"),0))} units`, "green"],
     ["Unique Materials",         new Set(df.map(r=>r._mappedMaterial||r["Material"])).size.toLocaleString(), `${new Set(df.map(r=>r["Plant"])).size} plants`, "purple"],
@@ -1150,6 +1169,31 @@ function getMappedVal(row, field) {
   if (!row._isMapped) return row[field] || 0;
   const cv = { "Value of Unrestricted Stock": "_cvValUnrestricted", "Value of Stock in Transit": "_cvValTransit", "Value of Stock in Quality Inspection": "_cvValQC" };
   return (cv[field] !== undefined ? row[cv[field]] : row[field]) || 0;
+}
+
+/**
+ * getVerifiedTransitQty(row, field)
+ * getVerifiedTransitVal(row, field)
+ *   Return transit qty/value MINUS any phantom (unverified) portion.
+ *   A transit row is "phantom" when it has Stock in Transit > 0 but no
+ *   matching entry with BOTH Purchasing Document AND Supplying Plant in
+ *   the transit detail file.  These items are physically unconfirmed and
+ *   must be excluded from every aggregate shown to the user.
+ *
+ *   FIX-TRANSIT-NODOC: applied to Dashboard, Home, and Flow KPIs so that
+ *   transit items without a Purchasing Document AND Supplying Plant are
+ *   excluded from ALL displayed totals, not just the Branch Comparison and
+ *   Transit pages where the fix was previously applied.
+ */
+function getVerifiedTransitQty(row) {
+  const raw     = getMappedQty(row, "Stock in Transit");
+  const phantom = row._phantomTransitQty || 0;
+  return Math.max(0, raw - phantom);
+}
+function getVerifiedTransitVal(row) {
+  const raw     = getMappedVal(row, "Value of Stock in Transit");
+  const phantom = row._phantomTransitVal || 0;
+  return Math.max(0, raw - phantom);
 }
 
 /**
@@ -2232,11 +2276,14 @@ function renderFlow() {
   renderPhantomAlert("flow-phantom-alert", df);
   renderMappingBanner("flow-mapping-banner");
 
-  const totalVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
-  const transitVal = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Transit"), 0);
+  // FIX-TRANSIT-NODOC: exclude transit items lacking both Purchasing Document
+  // AND Supplying Plant from Flow page KPIs and totals.
+  const transitVal = df.reduce((s,r) => s + getVerifiedTransitVal(r), 0);
+  const transitQty = df.reduce((s,r) => s + getVerifiedTransitQty(r), 0);
   const qcVal      = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
   const availVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock"), 0);
-  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock") + getMappedQty(r,"Stock in Transit") + getMappedQty(r,"Stock in Quality Inspection"), 0);
+  const totalVal   = availVal + transitVal + qcVal;
+  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock"), 0) + transitQty + df.reduce((s,r) => s + getMappedQty(r,"Stock in Quality Inspection"), 0);
   const availQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock"), 0);
 
   // FIX-PHANTOM-FLOW: for reorder alerts, only count non-phantom transit as "incoming"
@@ -2248,7 +2295,7 @@ function renderFlow() {
   setKpis("flow-kpis", [
     ["Total Inventory",      fmtETB(totalVal),   `${fmtQty(totalQty)} units`,               "blue"],
     ["Available Stock",      fmtETB(availVal),   `${fmtQty(availQty)} units unrestricted`,   "green"],
-    ["In Transit (Inbound)", fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Transit"),0))} units`, "amber"],
+    ["In Transit (Inbound)", fmtETB(transitVal), `${fmtQty(transitQty)} units`, "amber"],
     ["In QC",                fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Quality Inspection"),0))} units`, "red"],
     ["Reorder Alerts",       String(reorderItems.length), "Zero unrestricted stock", "red"],
   ]);
@@ -2543,9 +2590,12 @@ function renderHome() {
   if (kpiLabel) kpiLabel.style.display = "";
 
   const base       = getReconciledBase();
+  // FIX-TRANSIT-NODOC: use verified transit helpers so items without both
+  // Purchasing Document AND Supplying Plant are excluded from Home KPIs.
+  // Total Value / Total Qty are already corrected by recomputePhantomTransit.
   const totalVal   = base.reduce((s,r) => s + r["Total Value"], 0);
   const totalQty   = base.reduce((s,r) => s + r["Total Qty"],   0);
-  const transitVal = base.reduce((s,r) => s + r["Value of Stock in Transit"], 0);
+  const transitVal = base.reduce((s,r) => s + getVerifiedTransitVal(r), 0);
   const qcVal      = base.reduce((s,r) => s + r["Value of Stock in Quality Inspection"], 0);
 
   const today      = new Date();
