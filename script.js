@@ -1457,7 +1457,7 @@ function renderPhantomAlert(containerId, df) {
   // On transit page, the full phantom section is rendered separately via
   // renderPhantomTable — so the alert only needs a short "jump to section" link.
   const actionHtml = isTransitPage
-    ? `<a class="phantom-alert-link" style="white-space:nowrap" onclick="document.getElementById('transit-phantom-section').scrollIntoView({behavior:'smooth'})">View unverified items below ↓</a>`
+    ? `<a class="phantom-alert-link" style="white-space:nowrap" onclick="document.getElementById('transit-phantom-section').scrollIntoView({behavior:'smooth'})">View unverified items at bottom ↓</a>`
     : `<button class="phantom-alert-toggle" id="${tableId}-btn" onclick="(function(){
         var tbl=document.getElementById('${tableId}');
         var btn=document.getElementById('${tableId}-btn');
@@ -1475,7 +1475,7 @@ function renderPhantomAlert(containerId, df) {
         <strong>Unverified Transit Stock Excluded</strong>
         <span>${count.toLocaleString()} item${count!==1?"s":""} (${fmtQty(qty)} units · ${fmtETB(val)}) have <em>Stock in Transit</em> but
         lack a <em>Purchasing Document</em> and <em>Supplying Plant</em> in the transit detail file.
-        These items are <strong>excluded from all totals</strong> — verify with your supply team.</span>
+        These items are <strong>excluded from all totals</strong> — verify first.</span>
         <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-top:0.35rem">
           ${actionHtml}
         </div>
@@ -1590,7 +1590,7 @@ function renderTransit() {
   const phantomRows  = allTransitDf.filter(r => r._phantomTransitQty > 0);
   const phantomCount = new Set(phantomRows.map(r => r._mappedMaterial || r["Material"])).size;
   const phantomKpiExtra = phantomCount > 0 && stockTransitRaw.length
-    ? [[`Unverified Transit Items`, String(phantomCount), "No PO & Supplying Plant — see section below ↓", "amber"]]
+    ? [[`Unverified Transit Items`, String(phantomCount), "No PO & Supplying Plant — see bottom of page ↓", "amber"]]
     : [];
 
   setKpis("transit-kpis", [
@@ -2064,7 +2064,7 @@ function renderBranch() {
   // aggregateByMaterial is still used for the material tab (Tab 2) display only.
   const baseDf = applyPageFilter("branch");
 
-  renderPhantomAlert("branch-phantom-alert", baseDf);
+
   renderMappingBanner("branch-mapping-banner");
   const plants = [...new Set(baseDf.map(r => String(r["Plant"]).toUpperCase()))];
   // BUG-FIX-6: centralCode was computed but never read anywhere — removed dead variable.
@@ -2397,7 +2397,7 @@ function renderBranch() {
 function renderFlow() {
   const df = applyPageFilter("flow");
 
-  renderPhantomAlert("flow-phantom-alert", df);
+
   renderMappingBanner("flow-mapping-banner");
 
   // FIX-TRANSIT-NODOC: exclude transit items lacking both Purchasing Document
