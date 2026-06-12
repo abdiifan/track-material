@@ -2533,11 +2533,14 @@ function renderHome() {
 
   // Show summary KPIs if data is already loaded
   const kpiRow = document.getElementById("home-kpis");
+  const kpiLabel = document.getElementById("home-kpis-label");
   if (!rawDf.length) {
     kpiRow.style.display = "none";
+    if (kpiLabel) kpiLabel.style.display = "none";
     return;
   }
   kpiRow.style.display = "";
+  if (kpiLabel) kpiLabel.style.display = "";
 
   const base       = getReconciledBase();
   const totalVal   = base.reduce((s,r) => s + r["Total Value"], 0);
