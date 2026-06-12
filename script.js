@@ -1,3 +1,106 @@
+// =============================================================================
+// PharmaTrack v2 — Pharmaceutical Inventory Management System
+// =============================================================================
+// Fixes applied vs v8 (script__22_.js baseline):
+//  BUG-1  Preview download now exports full filtered dataset (not 500-row slice)
+//  BUG-2  Chain/circular reconciliation rules detected and blocked on save
+//  BUG-3  pageFilters reset on new file upload so stale plant/MG never persists
+//  BUG-4  "Already Expired" KPI now counts only stock-qty > 0 rows (matches table)
+//  BUG-5  Target materials blocked from being selected as a new source
+//  BUG-6  QC page no longer drops items with QC qty > 0 but zero ETB value
+//  BUG-7  rpSetSelected chip close button uses addEventListener, not inline onclick
+//  BUG-8  String expiry dates parsed as LOCAL midnight not UTC (timezone fix)
+//  BUG-9  CSV tab-character cells now quoted correctly
+//  BUG-10 groupBy empty-string bucket renamed to "(Blank)" for chart clarity
+//  PERF-1 File size warning before parse (>25 MB)
+//  ROBUST localStorage schema validated on load; corrupt entries discarded
+//  ROBUST Column header matching is now case-insensitive
+//  ROBUST Total Qty removed from QTY_COLS scaling (was scaled then overwritten)
+//  ROBUST Conversion factor stored with 9dp rounding to suppress float drift
+//
+// Specialist review fixes (v2 → v2.1):
+//  FIX-R1  aggregateByMaterial: removed duplicate "Value of Stock in Quality
+//          Inspection" entry in VAL_COLS that caused double-counting of QC value
+//          on QC page and Branch Comparison.
+//  FIX-R2  Reconciliation mapping file parser: column indices corrected to match
+//          documented format (source, desc, unit, factor, target, desc, unit).
+//          Factor now read from index 3; target from index 4; desc from index 5.
+//  FIX-R3  Reconciliation cache token strengthened: now includes a lightweight
+//          djb2 hash of all material codes so same-size file swaps correctly
+//          bust the cache.
+//  FIX-R4  renderTransit: removed redundant isNonMedical*/isExcluded* re-filters
+//          (rawDf is already fully filtered at parse time). Consistent with all
+//          other render* functions.
+//  FIX-R5  pageFilters: removed unused "preview" key (filtDf/preview uses its
+//          own <select multiple> UI; the pageFilters slot was dead state).
+//  FIX-R6  Global search and transit search panels now include CSV + Excel export
+//          buttons so users with >200/500 results have an export path.
+//  FIX-R7  Branch comparison: replaced native <select multiple> with the standard
+//          buildMultiSelect checkbox-dropdown for UX consistency.
+//  FIX-R8  loadTransitFile: now also applies isNonMedicalGroup filter when the
+//          column is present, consistent with main file parsing.
+//  FIX-R9  filters.js: isMedicalCode is now used inside isNonMedicalCode as its
+//          positive counterpart (DRY); dead export warning resolved.
+//  FIX-R10 Flow page "Material Inventory Flow Lookup" description corrected
+//          (was copy-pasted from QC section and incorrectly said "QC stock").
+//  FIX-R11 refreshReconcileGroupsList: delete listener now uses { once: true }
+//          to prevent double-fire on rapid successive calls.
+//  FIX-R12 localStorage: old versioned keys (v1, v2) cleaned up on startup.
+//
+// Storage-location exclusion & phantom transit hardening (v2.1 → v2.2):
+//  FIX-EXCL-SLOC   Materials excluded by storage location (ADG1, ARG1, ASG1 …)
+//                   are now also stripped from stockTransitRaw so they cannot
+//                   appear anywhere on the site — not even in the transit detail
+//                   section.  Cross-filter applied both in loadTransitFile (when
+//                   transit file loads after main) and in recomputePhantomTransit
+//                   (when main file loads after transit).
+//  FIX-PHANTOM-HIDE Phantom transit items (Stock in Transit > 0 but no matching
+//                   Purchasing Document AND Supplying Plant in the transit file)
+//                   are now hidden from every page except the "Stock in Transit
+//                   Detail" section (lower half of the Transit page).  Previously
+//                   they appeared with a warning badge in the main transit table,
+//                   in Global Search, in Branch Comparison totals, and in the
+//                   Inventory Flow transfer / reorder tables.  Now:
+//                   • renderTransit main table   — phantom rows excluded
+//                   • Global search transit      — phantom rows excluded
+//                   • Branch comparison aggMap   — phantom Transit/TransitQty subtracted
+//                   • Branch comparison matPlantMap — same subtraction
+//                   • Flow transferRows          — phantom rows excluded
+//                   • Flow reorderItems          — only non-phantom transit counts
+//                   The transit KPI card still shows a count so operators know
+//                   unverified items exist; the detail is in the Transit Detail
+//                   section where those rows remain visible.
+//
+// Transit no-doc exclusion — Dashboard / Home / Flow hardening (v2.2 → v2.3):
+//  FIX-TRANSIT-NODOC Transit items that do NOT have BOTH a Supplying Plant AND
+//                   a Purchasing Document in the transit detail file are now fully
+//                   excluded from every KPI and aggregate total on:
+//                   • Home page      — "Stock in Transit" KPI card
+//                   • Dashboard      — "Stock in Transit Value" KPI card and all
+//                                     Total Inventory Value / Total Qty aggregates
+//                   • Inventory Flow — "In Transit (Inbound)" KPI card and all
+//                                     Total Inventory / Total Qty aggregates
+//                   Two new helper functions (getVerifiedTransitQty /
+//                   getVerifiedTransitVal) encapsulate the phantom subtraction
+//                   logic and are used everywhere transit figures are surfaced.
+//                   Branch Comparison already applied this exclusion (FIX-PHANTOM-BRANCH
+//                   from v2.2); this fix brings Dashboard, Home, and Flow in line.
+//
+//  FIX-PHANTOM-VISIBLE Unverified transit items (phantom) are now fully visible to
+//                   users instead of only being mentioned in an alert banner.
+//                   Changes:
+//                   • Transit page — new "⚠️ Unverified Transit Items" amber section
+//                     appears directly on the page with a full table (Material, Plant,
+//                     Qty, Value), 5 KPI cards, and a CSV download button. The
+//                     "Verified Transit Items" section below it is clearly labelled.
+//                   • Transit KPI row — "Unverified Transit Items" card sub-label
+//                     updated to "see section below ↓" so users know where to look.
+//                   • Dashboard / Branch / Flow phantom alert banners — now include
+//                     a "Show unverified items ▾" toggle that expands an inline table
+//                     of phantom rows directly in the alert, plus a "Transit page →"
+//                     link. Users no longer have to navigate away just to see the list.
+// =============================================================================
+
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
 const REQUIRED_COLUMNS = [
   "Material","Material Description","Plant","Plant Name",
@@ -37,6 +140,126 @@ const PLOTLY_LAYOUT = {
 };
 const PLOTLY_CONFIG = { displayModeBar: false, responsive: true };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SUPABASE SETUP — multi-admin upload + shared data preview
+// ═══════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL      = "https://ncvjopissebqdkuuamig.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jdmpvcGlzc2VicWRrdXVhbWlnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyNDYyOTUsImV4cCI6MjA5NjgyMjI5NX0.jcj8QOGZpr8LJDo4663yW3-r0-nb3IsLjtOy-iN7N40";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let currentUser = null;
+let isAdmin     = false;
+
+// Date columns that need to be revived back into JS Date objects after
+// round-tripping through Supabase jsonb (which stores Dates as ISO strings).
+const SB_DATE_COLUMNS = ["Shelf Life Expiration Date", "Posting Date"];
+
+function _sbReviveDates(rows) {
+  return rows.map(r => {
+    const out = { ...r };
+    SB_DATE_COLUMNS.forEach(c => {
+      const v = out[c];
+      if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v)) {
+        const d = new Date(v);
+        if (!isNaN(d)) out[c] = d;
+      }
+    });
+    return out;
+  });
+}
+
+// Wraps a plain array of row-objects into a fake .xlsx File so it can be
+// fed through the existing loadFile/loadIncomingFile/etc parsers unchanged.
+function _sbArrayToFakeFile(rows, filename) {
+  const ws  = XLSX.utils.json_to_sheet(_sbReviveDates(rows));
+  const wb  = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+  const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  return new File([out], filename, { type: "application/octet-stream" });
+}
+
+// Saves a freshly-parsed dataset to Supabase, replacing whatever was there
+// before. Admin-only (RLS also enforces this server-side).
+async function sbSaveDataset(table, rows) {
+  if (!isAdmin || !currentUser) return;
+  try {
+    await sb.from(table).delete().neq("id", -1);
+    const CHUNK = 500;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK).map(r => ({ uploaded_by: currentUser.id, data: r }));
+      const { error } = await sb.from(table).insert(chunk);
+      if (error) throw error;
+    }
+  } catch (err) {
+    console.error(`Supabase save error (${table}):`, err);
+    alert(`⚠ Saved locally, but could not sync to the database: ${err.message}`);
+  }
+}
+
+// Fetches a dataset from Supabase and runs it through the given loader
+// function (loadFile / loadIncomingFile / loadTransitFile / loadMappingFile).
+async function sbLoadDataset(table, loaderFn, filename) {
+  try {
+    const { data, error } = await sb.from(table).select("data");
+    if (error) throw error;
+    if (!data || !data.length) return false;
+    loaderFn(_sbArrayToFakeFile(data.map(d => d.data), filename));
+    return true;
+  } catch (err) {
+    console.error(`Supabase load error (${table}):`, err);
+    return false;
+  }
+}
+
+async function sbLoadAllDatasets() {
+  await sbLoadDataset("inventory", loadFile,         "inventory.xlsx");
+  await sbLoadDataset("incoming",  loadIncomingFile, "incoming.xlsx");
+  await sbLoadDataset("transit",   loadTransitFile,  "transit.xlsx");
+  await sbLoadDataset("mapping",   loadMappingFile,  "mapping.xlsx");
+}
+
+// ── AUTH ─────────────────────────────────────────────────────────────────
+async function sbCheckAdmin(userId) {
+  const { data } = await sb.from("admins").select("user_id").eq("user_id", userId).maybeSingle();
+  return !!data;
+}
+
+function sbApplyAuthUI() {
+  document.body.classList.toggle("not-admin", !isAdmin);
+  const statusEl = document.getElementById("auth-status");
+  if (statusEl) {
+    statusEl.textContent = currentUser
+      ? `${currentUser.email}${isAdmin ? "  ·  Admin" : ""}`
+      : "Not signed in";
+  }
+  const overlay = document.getElementById("login-overlay");
+  if (overlay) overlay.style.display = currentUser ? "none" : "flex";
+}
+
+async function sbInitAuth() {
+  const { data: { session } } = await sb.auth.getSession();
+  currentUser = session?.user || null;
+  isAdmin     = currentUser ? await sbCheckAdmin(currentUser.id) : false;
+  sbApplyAuthUI();
+  if (currentUser) sbLoadAllDatasets();
+}
+
+async function sbLogin(email, password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  currentUser = data.user;
+  isAdmin     = await sbCheckAdmin(currentUser.id);
+  sbApplyAuthUI();
+  sbLoadAllDatasets();
+}
+
+async function sbLogout() {
+  await sb.auth.signOut();
+  currentUser = null;
+  isAdmin     = false;
+  sbApplyAuthUI();
+}
+
 // ── STATE ──────────────────────────────────────────────────────────────────
 let rawDf  = [];
 let filtDf = [];
@@ -48,7 +271,7 @@ let stFilterState      = { purDoc: "", supPlant: "" };  // filter state
 
 // Incoming Shelf Life — received goods file state
 let incomingRaw        = [];   // raw rows from received goods xlsx
-const islFilterState   = { date: "", valType: "", sloc: "", plant: "", flag: "" };
+const islFilterState   = { date: "", valType: "", sloc: "", plant: "", flag: "", material: "" };
 
 // Page-level filter state — now arrays for multi-select support
 // NOTE: "preview" page uses its own <select multiple> UI (filtDf), not pageFilters.
@@ -242,6 +465,7 @@ function loadFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { showError("The uploaded file contains no data."); return; }
+        sbSaveDataset("inventory", data);
 
         const trimmed = data.map(row => {
           const r = {};
@@ -741,6 +965,7 @@ function loadTransitFile(file) {
           statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Empty file</div>`;
           return;
         }
+        sbSaveDataset("transit", data);
 
         // Trim all column headers
         const trimmed = data.map(row => {
@@ -845,6 +1070,7 @@ function loadMappingFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Mapping file is empty.</div>`; return; }
+        sbSaveDataset("mapping", data);
 
         // Case-insensitive column lookup
         const colMap = {};
@@ -2669,6 +2895,7 @@ function loadIncomingFile(file) {
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!data.length) { statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">⚠ File empty</div>`; return; }
+        sbSaveDataset("incoming", data);
 
         const trimmed = data.map(row => {
           const r = {};
@@ -3062,10 +3289,24 @@ function _islPopulateFilters() {
     plantEl.innerHTML = `<option value="">All Plants</option>` +
       plants.map(p => `<option value="${escHtml(p)}">${escHtml(p)}</option>`).join("");
   }
+
+  // Material filter — code + description
+  const matMap = new Map();
+  incomingRaw.forEach(r => {
+    const code = String(getSiblingCode(r) || "").trim();
+    if (!code) return;
+    if (!matMap.has(code)) matMap.set(code, getSiblingDesc(r) || "");
+  });
+  const mats = [...matMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const matEl = document.getElementById("isl-filter-material");
+  if (matEl) {
+    matEl.innerHTML = `<option value="">All Materials</option>` +
+      mats.map(([code, desc]) => `<option value="${escHtml(code)}">${escHtml(code)}${desc ? " — " + escHtml(desc) : ""}</option>`).join("");
+  }
 }
 
 function _islGetFiltered() {
-  const { date, valType, sloc, plant, flag } = islFilterState;
+  const { date, valType, sloc, plant, flag, material } = islFilterState;
   return incomingRaw.filter(r => {
     // BUG-ISL-5 FIX: compare using local date string (not toISOString)
     if (date) {
@@ -3083,6 +3324,7 @@ function _islGetFiltered() {
       if (!rp.split(" · ").some(p => p.trim() === plant)) return false;
     }
     if (flag && r._receiptFlag !== flag) return false;
+    if (material && String(getSiblingCode(r) || "").trim() !== material) return false;
     return true;
   });
 }
@@ -3404,6 +3646,26 @@ function renderPage(id) {
 document.addEventListener("DOMContentLoaded", () => {
   // Dashboard is the default page (Home removed)
 
+  // ── Auth wiring ──
+  sbInitAuth();
+
+  document.getElementById("login-btn").addEventListener("click", async () => {
+    const email    = document.getElementById("login-email").value.trim();
+    const password = document.getElementById("login-password").value;
+    const errEl    = document.getElementById("login-error");
+    errEl.textContent = "";
+    if (!email || !password) { errEl.textContent = "Enter email and password."; return; }
+    try {
+      await sbLogin(email, password);
+    } catch (err) {
+      errEl.textContent = err.message || "Login failed.";
+    }
+  });
+  document.getElementById("login-password").addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("login-btn").click();
+  });
+  document.getElementById("logout-btn").addEventListener("click", () => { sbLogout(); });
+
   // Nav
   document.querySelectorAll(".nav-btn[data-page]").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -3435,11 +3697,12 @@ document.addEventListener("DOMContentLoaded", () => {
     islFilterState.sloc    = (document.getElementById("isl-filter-sloc")    || {}).value || "";
     islFilterState.plant   = (document.getElementById("isl-filter-plant")   || {}).value || "";
     islFilterState.flag    = (document.getElementById("isl-filter-flag")    || {}).value || "";
+    islFilterState.material = (document.getElementById("isl-filter-material") || {}).value || "";
     renderIncomingShelfLife();
   });
   document.getElementById("isl-filter-clear").addEventListener("click", () => {
-    islFilterState.date = islFilterState.valType = islFilterState.sloc = islFilterState.plant = islFilterState.flag = "";
-    ["isl-filter-date","isl-filter-valtype","isl-filter-sloc","isl-filter-plant","isl-filter-flag"].forEach(id => {
+    islFilterState.date = islFilterState.valType = islFilterState.sloc = islFilterState.plant = islFilterState.flag = islFilterState.material = "";
+    ["isl-filter-date","isl-filter-valtype","isl-filter-sloc","isl-filter-plant","isl-filter-flag","isl-filter-material"].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = "";
     });
     renderIncomingShelfLife();
