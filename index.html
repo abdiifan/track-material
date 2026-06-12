@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EPSS Stock-Multiple— Inventory Management</title>
+  <title>EPSS Stock-Multiple — Inventory Management</title>
   <style>
     .brand-icon img { height: 44px; width: auto; display: block; }
     .landing-logo img { height: 90px; width: auto; display: block; margin: 0 auto 0.5rem; }
@@ -62,6 +62,14 @@
   </label>
   <div id="transitFileStatus"></div>
 
+  <div class="sidebar-divider"></div>
+  <div class="upload-label">⚗️ Material Standardization</div>
+  <label class="upload-btn mapping-upload-btn" for="mappingFileInput">
+    <span id="mappingUploadBtnText">🗺️ Upload Mapping Excel</span>
+    <input type="file" id="mappingFileInput" accept=".xlsx,.xls" />
+  </label>
+  <div id="mappingFileStatus"></div>
+
   <!-- ══ GLOBAL MATERIAL SEARCH (Sidebar) ══ -->
   <div id="global-search-bar" style="display:none">
     <div class="sidebar-divider"></div>
@@ -79,7 +87,6 @@
     </div>
   </div>
 
-  <div class="sidebar-footer">Stock-MultipleTrack· ETB Currency</div>
 </aside>
 
 <!-- Global search results panel (outside sidebar, rendered in main area) -->
@@ -199,6 +206,8 @@
       <button type="button" class="apply-btn secondary small" id="dash-filter-clear">Clear</button>
     </div>
     <div class="kpi-row" id="dash-kpis"></div>
+    <div id="dash-phantom-alert"></div>
+    <div id="dash-mapping-banner"></div>
     <div class="chart-row">
       <div class="chart-box wide"><div class="section-header">Inventory Value &amp; Quantity by Plant</div><div id="chart-plant-val"></div></div>
       <div class="chart-box narrow"><div class="section-header">Material Group Distribution</div><div id="chart-cat-pie"></div></div>
@@ -249,6 +258,7 @@
       <div id="transit-search-results"></div>
     </div>
     <div class="kpi-row" id="transit-kpis"></div>
+    <div id="transit-mapping-banner"></div>
     <div class="chart-box full"><div class="section-header">Transit Quantity &amp; Value by Plant</div><div id="chart-transit-plant"></div></div>
     <div class="section-header" style="margin-top:1.5rem">Detailed Transit Items</div>
     <div id="transit-table-wrap"></div>
@@ -310,6 +320,7 @@
     </div>
 
     <div class="kpi-row" id="expiry-kpis"></div>
+    <div id="expiry-mapping-banner"></div>
     <div class="chart-box full">
       <div class="section-header" style="display:flex;align-items:center;gap:0.5rem">
         <span>Expiry Timeline — Items &amp; Value at Risk by Month</span>
@@ -370,6 +381,7 @@
     </div>
 
     <div class="kpi-row" id="qc-kpis"></div>
+    <div id="qc-mapping-banner"></div>
     <div class="chart-box full"><div class="section-header">QC Quantity &amp; Value by Plant</div><div id="chart-qc-plant"></div></div>
     <div class="section-header" style="margin-top:1.5rem">Detailed QC Items</div>
     <div id="qc-table-wrap"></div>
@@ -385,6 +397,8 @@
       </div>
     </div>
     <div id="branch-central-info" class="alert-info" style="margin-bottom:1rem;display:none"></div>
+    <div id="branch-phantom-alert"></div>
+    <div id="branch-mapping-banner"></div>
     <div class="filter-bar">
       <div class="ms-wrap" id="ms-branch-mg"><button class="ms-btn" type="button">All Material Groups <span class="ms-arrow">▾</span></button><div class="ms-dropdown" id="ms-branch-mg-dd"></div></div>
       <div class="ms-wrap" id="ms-branch-vt"><button class="ms-btn" type="button">All Val. Types <span class="ms-arrow">▾</span></button><div class="ms-dropdown" id="ms-branch-vt-dd"></div></div>
@@ -435,6 +449,8 @@
       <div id="flow-search-results"></div>
     </div>
     <div class="kpi-row" id="flow-kpis"></div>
+    <div id="flow-phantom-alert"></div>
+    <div id="flow-mapping-banner"></div>
     <div class="section-header">🔴 Reorder Alerts — Zero or Critically Low Unrestricted Stock</div>
     <div class="alert-warning" style="margin-bottom:0.8rem;font-size:0.78rem">Items with zero unrestricted stock but existing in transit or QC — immediate follow-up required.</div>
     <div id="reorder-table-wrap"></div>
@@ -456,6 +472,7 @@
       </div>
     </div>
     <div class="kpi-row" id="preview-kpis"></div>
+    <div id="preview-mapping-banner"></div>
     <div class="filter-panel">
       <div class="filter-group">
         <label>Plant</label>
@@ -502,10 +519,23 @@
     <div id="incoming-content" style="display:none">
       <!-- Legend -->
       <div class="isl-legend">
-        <span class="isl-dot isl-green"></span><span>Green — Remaining SL &gt; 90% of Total SL</span>
-        <span class="isl-dot isl-yellow"></span><span>Yellow — Remaining SL 80–90% of Total SL</span>
-        <span class="isl-dot isl-red"></span><span>Red — Remaining SL ≤ 80% of Total SL</span>
-        <span class="isl-dot isl-grey"></span><span>Grey — No Production Date</span>
+        <span class="isl-dot isl-green"></span><span>Green — Shelf Life at Receipt &gt; 2 years</span>
+        <span class="isl-dot isl-yellow"></span><span>Yellow — Shelf Life at Receipt 1.5–2 years</span>
+        <span class="isl-dot isl-red"></span><span>Red — Shelf Life at Receipt &lt; 1.5 years</span>
+        <span class="isl-dot isl-grey"></span><span>Grey — No Expiry Date / Data Error</span>
+      </div>
+
+      <!-- Material Search -->
+      <div class="chart-box full" style="margin-bottom:1rem">
+        <div class="section-header" style="margin-bottom:0.4rem">🔍 Material Search</div>
+        <div style="color:var(--muted);font-size:0.78rem;margin-bottom:0.75rem">Search any material to find its incoming shelf life record</div>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.75rem">
+          <input id="isl-search-input" type="text" placeholder="Type material code or name…"
+            style="flex:1;min-width:220px;max-width:400px;padding:0.45rem 0.75rem;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.82rem;outline:none" />
+          <button class="apply-btn small" id="isl-search-btn">Search</button>
+          <button class="apply-btn secondary small" id="isl-search-clear">Clear</button>
+        </div>
+        <div id="isl-search-results"></div>
       </div>
 
       <!-- Filters -->
@@ -526,19 +556,26 @@
           </select>
         </div>
         <div>
-          <label class="isl-filter-label">Storage Location</label>
+          <label class="isl-filter-label">HO01 Receipt Location</label>
           <select id="isl-filter-sloc" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;min-width:160px">
-            <option value="">All Storage Locations</option>
+            <option value="">All Receipt Locations</option>
+          </select>
+        </div>
+        <div>
+          <label class="isl-filter-label">Plant in Inventory</label>
+          <select id="isl-filter-plant" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;min-width:180px">
+            <option value="">All Plants</option>
           </select>
         </div>
         <div>
           <label class="isl-filter-label">Flag</label>
           <select id="isl-filter-flag" style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;min-width:130px">
             <option value="">All Flags</option>
-            <option value="green">🟢 Green</option>
-            <option value="yellow">🟡 Yellow</option>
-            <option value="red">🔴 Red</option>
-            <option value="grey">⚪ No Prod Date</option>
+            <!-- BUG-FIX-10: labels now match receipt-flag thresholds (legend lines above) -->
+            <option value="green">🟢 Green (&gt;2yr at receipt)</option>
+            <option value="yellow">🟡 Yellow (1.5–2yr at receipt)</option>
+            <option value="red">🔴 Red (&lt;1.5yr at receipt)</option>
+
           </select>
         </div>
         <button type="button" class="apply-btn small" id="isl-filter-apply">Apply</button>
@@ -550,7 +587,7 @@
 
       <!-- Chart -->
       <div class="chart-box full" style="margin-bottom:1.2rem">
-        <div class="section-header">Shelf Life Flag Distribution by Storage Location</div>
+        <div class="section-header">Shelf Life at Receipt Flag Distribution by Storage Location</div>
         <div id="isl-chart-sloc"></div>
       </div>
 
