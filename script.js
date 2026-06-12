@@ -193,36 +193,61 @@ async function sbSaveDataset(table, rows, statusElId) {
     return el;
   })() : null;
 
-  if (syncEl) syncEl.innerHTML = `☁️ Syncing to database…`;
+  // ── progress helper ───────────────────────────────────────────────────────
+  const CHUNK       = 1000;   // safe for JSONB rows; 2× faster than 500
+  const CONCURRENCY = 3;      // parallel insert workers
+  const totalChunks = Math.ceil(rows.length / CHUNK);
+  let   doneChunks  = 0;
+
+  function showProgress(msg) {
+    if (!syncEl) return;
+    const pct = totalChunks > 0 ? Math.round((doneChunks / totalChunks) * 100) : 0;
+    syncEl.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:220px">
+        <span>${msg}</span>
+        <div style="background:var(--border,#1e2e3d);border-radius:4px;height:6px;overflow:hidden">
+          <div style="background:var(--accent,#3a8fd4);width:${pct}%;height:100%;
+                      border-radius:4px;transition:width .25s ease"></div>
+        </div>
+        <span style="font-size:0.78rem;color:var(--muted,#7a97b0)">
+          ${doneChunks} / ${totalChunks} batches · ${rows.length.toLocaleString()} rows
+        </span>
+      </div>`;
+  }
+
+  showProgress("☁️ Syncing to database…");
+
+  // ── build all chunks up front ─────────────────────────────────────────────
+  const chunks = [];
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    chunks.push(
+      rows.slice(i, i + CHUNK).map(r => ({ uploaded_by: currentUser.id, data: r }))
+    );
+  }
+
   try {
+    // 1. Wipe existing data first (same as before)
     await sb.from(table).delete().neq("id", -1);
-    const CHUNK = 1000;
-    const chunks = [];
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      chunks.push(rows.slice(i, i + CHUNK).map(r => ({ uploaded_by: currentUser.id, data: r })));
-    }
-    // Insert chunks with limited concurrency (avoids overwhelming the API
-    // while still being much faster than one-at-a-time sequential awaits)
-    const CONCURRENCY = 4;
-    let nextIdx = 0;
-    let firstError = null;
-    async function worker() {
-      while (nextIdx < chunks.length) {
-        const idx = nextIdx++;
-        const { error } = await sb.from(table).insert(chunks[idx]);
-        if (error && !firstError) firstError = error;
-        if (syncEl && !firstError) {
-          const done = Math.min((idx + 1) * CHUNK, rows.length);
-          syncEl.innerHTML = `☁️ Syncing to database… (${done.toLocaleString()} / ${rows.length.toLocaleString()})`;
-        }
+
+    // 2. Insert in parallel windows of CONCURRENCY
+    for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+      const window = chunks.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        window.map(chunk => sb.from(table).insert(chunk))
+      );
+      for (const { error } of results) {
+        if (error) throw error;
       }
+      doneChunks += window.length;
+      showProgress("☁️ Syncing to database…");
     }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
-    if (firstError) throw firstError;
-    if (syncEl) syncEl.innerHTML = `<span style="color:var(--green)">✓ Synced to database (${rows.length.toLocaleString()} rows)</span>`;
+
+    if (syncEl) syncEl.innerHTML =
+      `<span style="color:var(--green)">✓ Synced to database (${rows.length.toLocaleString()} rows)</span>`;
   } catch (err) {
     console.error(`Supabase save error (${table}):`, err);
-    if (syncEl) syncEl.innerHTML = `<span style="color:var(--red)">✗ Sync failed: ${escHtml(err.message)}</span>`;
+    if (syncEl) syncEl.innerHTML =
+      `<span style="color:var(--red)">✗ Sync failed: ${escHtml(err.message)}</span>`;
     else alert(`⚠ Saved locally, but could not sync to the database: ${err.message}`);
   }
 }
