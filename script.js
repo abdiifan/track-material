@@ -110,7 +110,7 @@ let stFilterState      = { purDoc: "", supPlant: "" };  // filter state
 
 // Incoming Shelf Life — received goods file state
 let incomingRaw        = [];   // raw rows from received goods xlsx
-const islFilterState   = { date: "", valType: "", sloc: "", flag: "" };
+const islFilterState   = { date: "", valType: "", sloc: "", plant: "", flag: "" };
 
 // Page-level filter state — now arrays for multi-select support
 // NOTE: "preview" page uses its own <select multiple> UI (filtDf), not pageFilters.
@@ -124,19 +124,26 @@ const pageFilters = {
   incoming:  {},
 };
 
-// Returns the base dataset. Reconciliation has been removed; returns rawDf directly.
+// ── MATERIAL STANDARDIZATION MAPPING STATE ─────────────────────────────────
+// mappingTable: Map<sourceCode → { targetCode, targetDesc, factor }>
+let mappingTable   = new Map();   // populated when mapping file is uploaded
+let mappedDf       = [];          // rawDf rows after applyMaterialMapping()
+let mappingStats   = null;        // { mapped, total, valuePct } — shown in sidebar
+
+// Returns the base dataset with material standardization applied (if mapping loaded).
 function getReconciledBase() {
-  return rawDf;
+  return mappingTable.size > 0 ? mappedDf : rawDf;
 }
 
 // FIX BUG-3: reset all page filters when a new file is loaded so stale plant/MG
 // values from the previous file can never produce a blank result set.
 function resetPageFilters() {
   // BUG-RESET FIX: guard against pages (e.g. "branch") that have no "plants" key
+  // BUG-FIX-2: also guard mgs/valTypes keys so "incoming: {}" never gets phantom slots
   Object.keys(pageFilters).forEach(page => {
-    if ("plants" in pageFilters[page]) pageFilters[page].plants = [];
-    pageFilters[page].mgs = [];
-    pageFilters[page].valTypes = [];
+    if ("plants"   in pageFilters[page]) pageFilters[page].plants   = [];
+    if ("mgs"      in pageFilters[page]) pageFilters[page].mgs      = [];
+    if ("valTypes" in pageFilters[page]) pageFilters[page].valTypes = [];
   });
 }
 
@@ -178,12 +185,45 @@ function getSiblingCode(row) {
   ).trim();
 }
 
+// ── MAPPED MATERIAL RENDER HELPERS ────────────────────────────────────────
+// These are used by renderMatCode/renderMatDesc when row._isMapped is true.
+// Defined here (before renderMatCode) so the mutual reference resolves cleanly.
+
+function renderMappedMatCode_early(val, row) {
+  const target = escHtml(String(row._mappedMaterial || "").trim());
+  const orig   = escHtml(String(row._origMaterial   || "").trim());
+  if (!target) {
+    const s = escHtml(String(val ?? "").trim());
+    return s ? `<span class="col-mat-code">${s}</span>` : '<span style="color:var(--dim)">—</span>';
+  }
+  const codeHtml = `<span class="col-mat-code">${target}</span><span class="mat-mapped-badge" title="Standardized from ${orig}">STD</span>`;
+  if (orig && orig !== target) {
+    return codeHtml + `<span class="mat-orig-pill" title="Original SAP code">${orig}</span>`;
+  }
+  return codeHtml;
+}
+
+function renderMappedMatDesc_early(val, row) {
+  const tDesc = String(row._mappedDesc || row["Material Description"] || "").trim();
+  const oDesc = String(row._origDesc   || "").trim();
+  if (!tDesc) return '<span style="color:var(--dim)">—</span>';
+  let html = `<span class="col-mat-desc">${escHtml(tDesc)}</span>`;
+  if (oDesc && oDesc !== tDesc) {
+    html += `<div style="font-size:0.65rem;color:var(--dim);margin-top:1px;font-style:italic">${escHtml(oDesc)}</div>`;
+  }
+  return html;
+}
+
 // ── renderMatCode(val, row) ────────────────────────────────────────────────
 // Renders the "Material Code" cell.
 //  • Normal code  → purple monospace
 //  • Val looks like a description (has spaces / long) → amber "NAME" badge,
 //    styled differently so it's obvious this isn't a structured code
+//  • If row._isMapped → delegates to renderMappedMatCode for standardized display
 function renderMatCode(val, row) {
+  // Delegate to mapped renderer when standardization is active for this row
+  if (row && row._isMapped) return renderMappedMatCode_early(val, row);
+
   const s = escHtml(String(val ?? "").trim());
   if (!s) return '<span style="color:var(--dim)">—</span>';
 
@@ -199,7 +239,10 @@ function renderMatCode(val, row) {
 // Renders the "Material Description" cell.
 //  • If description === code (SAP duplicate) → show italic muted "(same as code)"
 //  • Otherwise → normal readable text
+//  • If row._isMapped → delegates to renderMappedMatDesc
 function renderMatDesc(val, row) {
+  if (row && row._isMapped) return renderMappedMatDesc_early(val, row);
+
   const desc = String(val ?? "").trim();
   const code = getSiblingCode(row);
 
@@ -302,6 +345,9 @@ function loadFile(file) {
 
         rawDf  = df;
         filtDf = df;
+
+        // Apply material standardization mapping if already loaded
+        if (mappingTable.size > 0) applyMaterialMapping();
 
         // ISL-MATCH: re-cross-match received goods against new inventory snapshot
         // (handles the case where incoming file was uploaded before inventory)
@@ -623,8 +669,12 @@ function downloadCSV(data, cols, filename) {
     const needsQuote = v.includes(",") || v.includes('"') || v.includes("\n") || v.includes("\t");
     if (needsQuote) {
       v = `"${v.replace(/"/g, '""')}"`;
-    } else if (/^[=+\-@\r]/.test(v)) {
-      // Injection guard only for non-quoted values (\t already handled above via quoting)
+    } else if (/^[=+\-@]/.test(v)) {
+      // BUG-FIX-7: removed \r from injection guard regex. A value beginning with
+      // \r\n (Windows line ending) would get a spurious ' prefix producing garbage
+      // like '\r\nsome text. Carriage returns are already handled by the needsQuote
+      // path above via the \n check (they always appear together in Windows line
+      // endings). Formula-injection characters =, +, -, @ still guarded.
       v = `'${v}`;
     }
     return v;
@@ -653,19 +703,20 @@ function renderDashboard() {
   const df = applyPageFilter("dashboard");
 
   renderPhantomAlert("dash-phantom-alert", df);
+  renderMappingBanner("dash-mapping-banner");
 
-  const totalVal   = df.reduce((s,r) => s + r["Total Value"], 0);
-  const transitVal = df.reduce((s,r) => s + r["Value of Stock in Transit"], 0);
-  const qcVal      = df.reduce((s,r) => s + r["Value of Stock in Quality Inspection"], 0);
-  const availVal   = df.reduce((s,r) => s + r["Value of Unrestricted Stock"], 0);
-  const totalQty   = df.reduce((s,r) => s + r["Total Qty"], 0);
+  const totalVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
+  const transitVal = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Transit"), 0);
+  const qcVal      = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
+  const availVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock"), 0);
+  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock") + getMappedQty(r,"Stock in Transit") + getMappedQty(r,"Stock in Quality Inspection"), 0);
 
   setKpis("dash-kpis", [
     ["Total Inventory Value",    fmtETB(totalVal),   `${fmtQty(totalQty)} total units`,      "blue"],
-    ["Stock in Transit Value",   fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+r["Stock in Transit"],0))} units`, "amber"],
-    ["Value in QC",              fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+r["Stock in Quality Inspection"],0))} units`, "red"],
-    ["Available (Unrestricted)", fmtETB(availVal),   `${fmtQty(df.reduce((s,r) => s+r["Unrestricted Stock"],0))} units`, "green"],
-    ["Unique Materials",         new Set(df.map(r=>r["Material"])).size.toLocaleString(), `${new Set(df.map(r=>r["Plant"])).size} plants`, "purple"],
+    ["Stock in Transit Value",   fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Transit"),0))} units`, "amber"],
+    ["Value in QC",              fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Quality Inspection"),0))} units`, "red"],
+    ["Available (Unrestricted)", fmtETB(availVal),   `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Unrestricted Stock"),0))} units`, "green"],
+    ["Unique Materials",         new Set(df.map(r=>r._mappedMaterial||r["Material"])).size.toLocaleString(), `${new Set(df.map(r=>r["Plant"])).size} plants`, "purple"],
   ]);
 
   // Plant bar — dual axis qty+value
@@ -817,7 +868,323 @@ function loadTransitFile(file) {
   reader.readAsArrayBuffer(file);
 }
 
-// ─── Render the Stock in Transit detail section (lower half of Transit page) ─
+// ═══════════════════════════════════════════════════════════════════════════
+// MATERIAL STANDARDIZATION MAPPING — File Loader & Core Logic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * loadMappingFile(file)
+ *   Parses the uploaded mapping Excel and populates mappingTable.
+ *   Expected columns (case-insensitive):
+ *     Material Code SORCE / Material Code Source → source code
+ *     Material Description (source)              → source desc (informational)
+ *     Conversion Factor                          → multiplier
+ *     Material Code Target                       → target code
+ *     Material Description (target)              → target desc
+ *
+ * After parsing, calls applyMaterialMapping() and re-renders the current page.
+ */
+function loadMappingFile(file) {
+  const statusEl = document.getElementById("mappingFileStatus");
+  statusEl.style.display = "block";
+  statusEl.innerHTML = `<div class="status-ok">⏳ LOADING…</div><div class="status-name">Parsing ${escHtml(file.name)}</div>`;
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    setTimeout(() => {
+      try {
+        const wb   = XLSX.read(new Uint8Array(e.target.result), { type: "array" });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { defval: "" });
+        if (!data.length) { statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Mapping file is empty.</div>`; return; }
+
+        // Case-insensitive column lookup
+        const colMap = {};
+        Object.keys(data[0]).forEach(k => { colMap[k.toLowerCase().trim()] = k; });
+        const gc = (...names) => {
+          for (const n of names) {
+            const k = colMap[n.toLowerCase()];
+            if (k) return k;
+          }
+          return null;
+        };
+
+        const colSource  = gc("material code sorce","material code source","material code (source)","source material code","source code");
+        const colTarget  = gc("material code target","target material code","target code");
+        const colFactor  = gc("conversion factor","factor","conv factor","conversion");
+        const colTgtDesc = gc("material description (target)","target description","target desc","material description target");
+
+        if (!colSource || !colTarget || !colFactor) {
+          statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Missing required columns.<br/><span style="font-size:0.65rem">Need: Material Code Source, Material Code Target, Conversion Factor</span></div>`;
+          return;
+        }
+
+        // Build the mapping table — source → { targetCode, targetDesc, factor }
+        const newMap = new Map();
+        let skipped  = 0;
+        data.forEach(row => {
+          const src    = String(row[colSource]  ?? "").trim();
+          const tgt    = String(row[colTarget]  ?? "").trim();
+          const rawFac = String(row[colFactor]  ?? "").trim();
+          const tDesc  = colTgtDesc ? String(row[colTgtDesc] ?? "").trim() : "";
+          const factor = parseFloat(rawFac);
+
+          if (!src || !tgt || isNaN(factor) || factor <= 0) { skipped++; return; }
+          // Store with 9dp rounding to suppress float drift (consistent with existing reconciliation logic)
+          newMap.set(src.toUpperCase(), { targetCode: tgt, targetDesc: tDesc, factor: parseFloat(factor.toFixed(9)) });
+        });
+
+        if (!newMap.size) {
+          statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ No valid mapping rows found (${skipped} skipped).</div>`;
+          return;
+        }
+
+        mappingTable = newMap;
+
+        // Apply to current inventory (if loaded)
+        if (rawDf.length) applyMaterialMapping();
+
+        statusEl.innerHTML = `
+          <div class="status-ok">✓ MAPPING LOADED</div>
+          <div class="status-name">${escHtml(file.name)}</div>
+          <div class="status-stats">${newMap.size.toLocaleString()} mapping rules${skipped ? ` · ${skipped} rows skipped` : ""}</div>
+          ${mappingStats ? `<div class="status-stats">${mappingStats.mapped.toLocaleString()} materials mapped · ${mappingStats.valuePct}% of stock value</div>` : ""}`;
+        document.getElementById("mappingUploadBtnText").textContent = "🗺️ Change Mapping File";
+
+        // Re-render current page with mapped data
+        if (rawDf.length) {
+          const reRender = {
+            dashboard: renderDashboard, transit: () => { renderTransit(); renderStockTransitSection(); },
+            expiry: renderExpiry, qc: renderQC, branch: renderBranch, flow: renderFlow,
+            preview: renderPreview, home: renderHome, incoming: renderIncoming,
+          };
+          if (reRender[currentPage]) reRender[currentPage]();
+        }
+      } catch (err) {
+        statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ ${escHtml(err.message)}</div>`;
+      }
+    }, 30);
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+/**
+ * applyMaterialMapping()
+ *   Walks rawDf and stamps every row with:
+ *     _mappedMaterial  — target material code (or original if no mapping)
+ *     _mappedDesc      — target description   (or original)
+ *     _mappingFactor   — conversion factor     (1.0 if no mapping)
+ *     _isMapped        — boolean: true = this row has a mapping entry
+ *     _origMaterial    — always the original Material code (for traceability)
+ *     _origDesc        — always the original Material Description
+ *
+ *   Converted quantity / value fields on the row object are also stamped:
+ *     _cvUnrestricted, _cvTransit, _cvQC, _cvBlocked
+ *     _cvValUnrestricted, _cvValTransit, _cvValQC
+ *     _cvTotalQty, _cvTotalValue
+ *
+ *   The "Material" and "Material Description" fields are NOT mutated here —
+ *   rendering helpers use _mappedMaterial / _mappedDesc so the original SAP
+ *   code is always recoverable.
+ *
+ *   mappedDf is a shallow copy of rawDf with the above extra fields; all
+ *   downstream render functions call getReconciledBase() which returns mappedDf
+ *   when a mapping is active.
+ *
+ *   Also computes mappingStats { mapped, total, valuePct }.
+ *
+ *   PHARMA BEST PRACTICE: batches with different expiry dates are NEVER merged.
+ *   The row-level conversion only rescales quantities; aggregation at a higher
+ *   level groups by _mappedMaterial (and expiry for watchlist purposes).
+ */
+function applyMaterialMapping() {
+  if (!rawDf.length) return;
+
+  let mappedCount = 0;
+  let totalValue  = 0;
+  let mappedValue = 0;
+
+  mappedDf = rawDf.map(row => {
+    const srcCode = String(row["Material"] || "").trim().toUpperCase();
+    const entry   = mappingTable.get(srcCode);
+    totalValue += row["Total Value"] || 0;
+
+    if (!entry) {
+      // No mapping → keep original, factor = 1
+      return {
+        ...row,
+        _mappedMaterial: row["Material"],
+        _mappedDesc:     row["Material Description"],
+        _mappingFactor:  1.0,
+        _isMapped:       false,
+        _origMaterial:   row["Material"],
+        _origDesc:       row["Material Description"],
+        // Converted = original (factor 1)
+        _cvUnrestricted:    row["Unrestricted Stock"],
+        _cvTransit:         row["Stock in Transit"],
+        _cvQC:              row["Stock in Quality Inspection"],
+        _cvBlocked:         row["Blocked Stock"],
+        _cvValUnrestricted: row["Value of Unrestricted Stock"],
+        _cvValTransit:      row["Value of Stock in Transit"],
+        _cvValQC:           row["Value of Stock in Quality Inspection"],
+        _cvTotalQty:        row["Total Qty"],
+        _cvTotalValue:      row["Total Value"],
+      };
+    }
+
+    // Mapping found — apply conversion factor
+    const f = entry.factor;
+    const cvUnrestricted    = parseFloat(((row["Unrestricted Stock"]              || 0) * f).toFixed(9));
+    const cvTransit         = parseFloat(((row["Stock in Transit"]                || 0) * f).toFixed(9));
+    const cvQC              = parseFloat(((row["Stock in Quality Inspection"]     || 0) * f).toFixed(9));
+    const cvBlocked         = parseFloat(((row["Blocked Stock"]                   || 0) * f).toFixed(9));
+    const cvValUnrestricted = parseFloat(((row["Value of Unrestricted Stock"]     || 0) * f).toFixed(9));
+    const cvValTransit      = parseFloat(((row["Value of Stock in Transit"]       || 0) * f).toFixed(9));
+    const cvValQC           = parseFloat(((row["Value of Stock in Quality Inspection"] || 0) * f).toFixed(9));
+    const cvTotalQty        = cvUnrestricted + cvTransit + cvQC;
+    const cvTotalValue      = cvValUnrestricted + cvValTransit + cvValQC;
+
+    mappedCount++;
+    mappedValue += cvTotalValue;
+
+    return {
+      ...row,
+      // Keep original SAP fields intact — render functions read _mapped* for display
+      _mappedMaterial: entry.targetCode,
+      _mappedDesc:     entry.targetDesc || row["Material Description"],
+      _mappingFactor:  f,
+      _isMapped:       true,
+      _origMaterial:   row["Material"],
+      _origDesc:       row["Material Description"],
+      _cvUnrestricted:    cvUnrestricted,
+      _cvTransit:         cvTransit,
+      _cvQC:              cvQC,
+      _cvBlocked:         cvBlocked,
+      _cvValUnrestricted: cvValUnrestricted,
+      _cvValTransit:      cvValTransit,
+      _cvValQC:           cvValQC,
+      _cvTotalQty:        cvTotalQty,
+      _cvTotalValue:      cvTotalValue,
+    };
+  });
+
+  // Compute stats
+  const valuePct = totalValue > 0 ? Math.round((mappedValue / totalValue) * 100) : 0;
+  mappingStats = { mapped: mappedCount, total: rawDf.length, valuePct };
+
+  // Refresh sidebar status to show stats
+  const statusEl = document.getElementById("mappingFileStatus");
+  if (statusEl && statusEl.style.display !== "none") {
+    const existing = statusEl.innerHTML;
+    // Only update the stats line; don't re-write if mid-load
+    const statsDiv = statusEl.querySelector(".status-stats:last-child");
+    if (statsDiv) statsDiv.textContent = `${mappedCount.toLocaleString()} materials mapped · ${valuePct}% of stock value`;
+  }
+}
+
+/**
+ * renderMappingBanner(containerId)
+ *   Injects a purple info banner into the given element showing mapping status.
+ *   No-ops if no mapping is active.
+ */
+function renderMappingBanner(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!mappingTable.size || !mappingStats) { el.innerHTML = ""; return; }
+  const { mapped, total, valuePct } = mappingStats;
+  el.innerHTML = `
+    <div class="mapping-active-banner">
+      ⚗️ Material Standardization Active —
+      <b>${mapped.toLocaleString()} materials mapped</b> ·
+      <b>${valuePct}%</b> of total stock value standardized ·
+      <span style="font-size:0.7rem;color:var(--muted)">${mappingTable.size.toLocaleString()} mapping rules loaded</span>
+    </div>`;
+}
+
+// Aliases — full implementations are renderMappedMatCode_early / renderMappedMatDesc_early above.
+const renderMappedMatCode = renderMappedMatCode_early;
+const renderMappedMatDesc = renderMappedMatDesc_early;
+
+/**
+ * getMappedQty(row, field)
+ * getMappedVal(row, field)
+ *   Return the standardized (converted) value for a quantity/value column.
+ *   When mapping is not active or row is not mapped, return the raw SAP value.
+ *   This is the single point of truth used by all aggregate functions.
+ */
+function getMappedQty(row, field) {
+  if (!row._isMapped) return row[field] || 0;
+  const cv = { "Unrestricted Stock": "_cvUnrestricted", "Stock in Transit": "_cvTransit", "Stock in Quality Inspection": "_cvQC", "Blocked Stock": "_cvBlocked" };
+  return (cv[field] !== undefined ? row[cv[field]] : row[field]) || 0;
+}
+function getMappedVal(row, field) {
+  if (!row._isMapped) return row[field] || 0;
+  const cv = { "Value of Unrestricted Stock": "_cvValUnrestricted", "Value of Stock in Transit": "_cvValTransit", "Value of Stock in Quality Inspection": "_cvValQC" };
+  return (cv[field] !== undefined ? row[cv[field]] : row[field]) || 0;
+}
+
+/**
+ * aggregateByMappedMaterial(df)
+ *   Like aggregateByMaterial but groups by _mappedMaterial (or Material when
+ *   no mapping active), uses converted quantities, and preserves original code
+ *   traceability via _origMaterial.
+ */
+function aggregateByMappedMaterial(df) {
+  const useMapped = mappingTable.size > 0;
+  const QTY_FIELDS = ["Unrestricted Stock","Stock in Quality Inspection","Blocked Stock","Stock in Transit"];
+  const VAL_FIELDS = ["Value of Unrestricted Stock","Value of Stock in Quality Inspection","Value of Stock in Transit"];
+
+  const matMap = {};
+  df.forEach(row => {
+    const mat = useMapped ? (row._mappedMaterial || row["Material"]) : row["Material"];
+    if (!mat) return;
+    if (!matMap[mat]) {
+      matMap[mat] = {
+        ...row,
+        "Material":             mat,
+        "Material Description": useMapped ? (row._mappedDesc || row["Material Description"]) : row["Material Description"],
+        _mappedMaterial:        mat,
+        _allPlants:             [],
+        _origCodes:             new Set(),
+      };
+      QTY_FIELDS.forEach(c => { matMap[mat][c] = 0; });
+      VAL_FIELDS.forEach(c => { matMap[mat][c] = 0; });
+      if (row["Plant Name"]) matMap[mat]._allPlants.push(row["Plant Name"]);
+      if (row._origMaterial)  matMap[mat]._origCodes.add(row._origMaterial);
+    } else {
+      const target = matMap[mat];
+      QTY_FIELDS.forEach(c => { target[c] += getMappedQty(row, c); });
+      VAL_FIELDS.forEach(c => { target[c] += getMappedVal(row, c); });
+      // Keep earliest expiry across all batches (pharma best practice)
+      const te = target["_expiry"], se = row["_expiry"];
+      if (se instanceof Date && !isNaN(se)) {
+        if (!(te instanceof Date) || isNaN(te) || se < te) target["_expiry"] = se;
+      }
+      if (row["Plant Name"] && !target._allPlants.includes(row["Plant Name"])) {
+        target._allPlants.push(row["Plant Name"]);
+      }
+      if (row._origMaterial)  target._origCodes.add(row._origMaterial);
+      if (!target["Material Group Name"] && row["Material Group Name"]) target["Material Group Name"] = row["Material Group Name"];
+    }
+  });
+
+  Object.values(matMap).forEach(row => {
+    row["Total Qty"]   = (row["Unrestricted Stock"] || 0) + (row["Stock in Transit"] || 0) + (row["Stock in Quality Inspection"] || 0);
+    row["Total Value"] = (row["Value of Unrestricted Stock"] || 0) + (row["Value of Stock in Transit"] || 0) + (row["Value of Stock in Quality Inspection"] || 0);
+    const plants = (row._allPlants || []).filter(Boolean).sort();
+    row["_plantList"]  = plants.length ? plants.join(", ") : (row["Plant Name"] || "—");
+    // Build traceability string for detail tables
+    const origCodes    = [...(row._origCodes || [])].filter(c => c !== row["Material"]);
+    row._traceCodes    = origCodes.length ? origCodes.join(", ") : "";
+  });
+
+  return Object.values(matMap);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// END MATERIAL STANDARDIZATION MAPPING
+// ─────────────────────────────────────────────────────────────────────────────
+
 function renderStockTransitSection() {
   const noFileEl  = document.getElementById("stock-transit-no-file");
   const contentEl = document.getElementById("stock-transit-content");
@@ -1014,12 +1381,14 @@ function renderTransit() {
     !(r._phantomTransitQty > 0)   // exclude phantom rows from this table
   );
 
-  const totalTV = df.reduce((s,r) => s + r["Value of Stock in Transit"], 0);
-  const totalTQ = df.reduce((s,r) => s + r["Stock in Transit"], 0);
-  const uniqMat = new Set(df.map(r => r["Material"])).size;
+  const totalTV = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Transit"), 0);
+  const totalTQ = df.reduce((s,r) => s + getMappedQty(r,"Stock in Transit"), 0);
+  const uniqMat = new Set(df.map(r => r._mappedMaterial||r["Material"])).size;
 
   // Phantom transit summary for transit KPIs — compute from full applyPageFilter set
   const allTransitDf = applyPageFilter("transit").filter(r => r["Stock in Transit"] > 0 && r["Value of Stock in Transit"] > 0);
+
+  renderMappingBanner("transit-mapping-banner");
   const phantomRows = allTransitDf.filter(r => r._phantomTransitQty > 0);
   const phantomCount = phantomRows.length;
   const phantomKpiExtra = phantomCount > 0 && stockTransitRaw.length
@@ -1046,14 +1415,14 @@ function renderTransit() {
   ];
   const transitRows = sortBy([...df], "Value of Stock in Transit").map(r => {
     const info = getTransitInfo(r["Material"], r["Plant"]);
-    const isPhantom = r._phantomTransitQty > 0;
+    // BUG-FIX-3: removed dead isPhantom branch — df already filters out phantom rows
+    // (!(r._phantomTransitQty > 0) above), so the badge-phantom branch could never
+    // execute here. Status is now purely value-based.
     return {
       ...r,
       _purDoc:   info.purDoc,
       _supPlant: info.supPlant,
-      _status: isPhantom
-        ? "<span class='badge badge-phantom'>⚠ No PO / No Supplying Plant — Not Physically Confirmed</span>"
-        : r["Value of Stock in Transit"] > 100000 ? "<span class='badge badge-red'>Critical</span>"
+      _status: r["Value of Stock in Transit"] > 100000 ? "<span class='badge badge-red'>Critical</span>"
         : r["Value of Stock in Transit"] > 50000  ? "<span class='badge badge-amber'>High</span>"
         : r["Value of Stock in Transit"] > 10000  ? "<span class='badge badge-amber'>Medium</span>"
         : "<span class='badge badge-green'>Low</span>",
@@ -1124,6 +1493,7 @@ function clearTransitSearch() {
 // ═══════════════════════════════════════════════════════════════════════════
 function renderExpiry() {
   const baseDf  = applyPageFilter("expiry");
+  renderMappingBanner("expiry-mapping-banner");
   const months  = parseInt(document.querySelector('input[name="expWin"]:checked')?.value || 6);
   const today   = new Date();
   const cutoff  = new Date(today); cutoff.setMonth(cutoff.getMonth() + months);
@@ -1438,7 +1808,9 @@ function renderQC() {
   // RECONCILIATION: aggregate all source codes into their target canonical code
   // so each material appears exactly once (e.g. three ASA variants → one total).
   const rawFiltered = applyPageFilter("qc").filter(r => r["Stock in Quality Inspection"] > 0);
-  const df          = aggregateByMaterial(rawFiltered).filter(r => r["Stock in Quality Inspection"] > 0);
+  const df          = aggregateByMappedMaterial(rawFiltered).filter(r => r["Stock in Quality Inspection"] > 0);
+
+  renderMappingBanner("qc-mapping-banner");
 
   const totalQCVal = df.reduce((s,r) => s + r["Value of Stock in Quality Inspection"], 0);
   const totalQCQty = df.reduce((s,r) => s + r["Stock in Quality Inspection"], 0);
@@ -1457,8 +1829,8 @@ function renderQC() {
   ], pl({height:280,margin:{l:20,r:60,t:20,b:80},yaxis2:{overlaying:"y",side:"right",gridcolor:"transparent",tickfont:{color:"#3fb950"}}}), PLOTLY_CONFIG);
 
   const qcCols = [
-    {key:"Material", label:"Material Code", fmt:(val,r)=>renderMatCode(val,r), raw:true, cellClass:"col-mat-code-wrap"},
-    {key:"Material Description", label:"Material Description", fmt:(val,r)=>renderMatDesc(val,r), raw:true, cellClass:"col-mat-desc-wrap"},
+    {key:"Material", label:"Material Code", fmt:(val,r)=>renderMappedMatCode(val,r), raw:true, cellClass:"col-mat-code-wrap"},
+    {key:"Material Description", label:"Material Description", fmt:(val,r)=>renderMappedMatDesc(val,r), raw:true, cellClass:"col-mat-desc-wrap"},
     {key:"Material Group Name",                  label:"Material Group"},
     {key:"_plantList",                           label:"Plant(s)"},
     {key:"_expiryStr",                           label:"Shelf Life Expiry"},
@@ -1489,12 +1861,12 @@ function renderBranch() {
   const baseDf = applyPageFilter("branch");
 
   renderPhantomAlert("branch-phantom-alert", baseDf);
-
-  // Detect central branch from raw (multi-plant) data
+  renderMappingBanner("branch-mapping-banner");
   const plants = [...new Set(baseDf.map(r => String(r["Plant"]).toUpperCase()))];
-  let centralCode, centralName;
+  // BUG-FIX-6: centralCode was computed but never read anywhere — removed dead variable.
+  // All downstream logic uses centralName (the display name).
+  let centralName;
   if (plants.includes("HO01")) {
-    centralCode = "HO01";
     centralName = baseDf.find(r => String(r["Plant"]).toUpperCase() === "HO01")?.["Plant Name"] || "HO01";
     document.getElementById("branch-central-info").style.display = "none";
   } else {
@@ -1505,25 +1877,23 @@ function renderBranch() {
     document.getElementById("branch-central-info").innerHTML = `ℹ️ HO01 not found — using <b>${escHtml(centralName)}</b> as central branch (highest inventory value).`;
   }
 
-  // Build per-branch aggregation from baseDf (correct: each row is one plant)
-  // FIX-BRANCH-ITEMS: track unique materials per branch using a Set, not a raw row counter.
-  // The old Items++ counted one per storage-location row, inflating counts by 1.5×–2.6×.
   const aggMap = {};
   const aggMatSets = {}; // separate Sets to count unique materials without mutating aggMap
   baseDf.forEach(r => {
     const k = r["Plant Name"];
     if (!aggMap[k]) { aggMap[k] = {PlantName:k,Plant:r["Plant"],TotalValue:0,Unrestricted:0,Transit:0,QC:0,UnrestrictedQty:0,TransitQty:0,QCQty:0,Items:0}; aggMatSets[k] = new Set(); }
-    aggMap[k].TotalValue      += r["Total Value"];
-    aggMap[k].Unrestricted    += r["Value of Unrestricted Stock"];
+    aggMap[k].TotalValue      += getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") + getMappedVal(r,"Value of Stock in Quality Inspection");
+    aggMap[k].Unrestricted    += getMappedVal(r,"Value of Unrestricted Stock");
     // FIX-PHANTOM-BRANCH: exclude phantom (no PO/supplying plant) transit from branch totals
     const phantomVal = r._phantomTransitVal || 0;
     const phantomQty = r._phantomTransitQty || 0;
-    aggMap[k].Transit         += r["Value of Stock in Transit"] - phantomVal;
-    aggMap[k].QC              += r["Value of Stock in Quality Inspection"];
-    aggMap[k].UnrestrictedQty += r["Unrestricted Stock"];
-    aggMap[k].TransitQty      += r["Stock in Transit"] - phantomQty;
-    aggMap[k].QCQty           += r["Stock in Quality Inspection"];
-    aggMatSets[k].add(String(r["Material"]));
+    aggMap[k].Transit         += getMappedVal(r,"Value of Stock in Transit") - phantomVal;
+    aggMap[k].QC              += getMappedVal(r,"Value of Stock in Quality Inspection");
+    aggMap[k].UnrestrictedQty += getMappedQty(r,"Unrestricted Stock");
+    aggMap[k].TransitQty      += getMappedQty(r,"Stock in Transit") - phantomQty;
+    aggMap[k].QCQty           += getMappedQty(r,"Stock in Quality Inspection");
+    const matKey = (mappingTable.size > 0 ? r._mappedMaterial : null) || r["Material"];
+    aggMatSets[k].add(String(matKey));
   });
   // Assign correct unique-material counts after accumulation
   Object.keys(aggMap).forEach(k => { aggMap[k].Items = aggMatSets[k].size; });
@@ -1534,31 +1904,32 @@ function renderBranch() {
   // is a separate bucket. Using aggregated df would give only one plant per material.
   const matPlantMap = {};
   baseDf.forEach(r => {
-    const mat = r["Material"], pln = r["Plant Name"];
+    const mat = (mappingTable.size > 0 ? r._mappedMaterial : null) || r["Material"];
+    const pln = r["Plant Name"];
     if (!matPlantMap[mat]) {
       matPlantMap[mat] = {
-        desc:  r["Material Description"],
+        desc:  (mappingTable.size > 0 ? r._mappedDesc : null) || r["Material Description"],
         group: r["Material Group Name"],
       };
     }
     if (!matPlantMap[mat][pln]) matPlantMap[mat][pln] = {Unrestricted:0,Transit:0,QC:0,TotalValue:0,TotalQty:0,UnrestrictedQty:0,TransitQty:0,QCQty:0};
-    matPlantMap[mat][pln].Unrestricted    += r["Value of Unrestricted Stock"];
+    matPlantMap[mat][pln].Unrestricted    += getMappedVal(r,"Value of Unrestricted Stock");
     // FIX-PHANTOM-BRANCH: exclude phantom transit from per-material-per-branch data
     const phantomVal = r._phantomTransitVal || 0;
     const phantomQty = r._phantomTransitQty || 0;
-    matPlantMap[mat][pln].Transit         += r["Value of Stock in Transit"] - phantomVal;
-    matPlantMap[mat][pln].QC             += r["Value of Stock in Quality Inspection"];
-    matPlantMap[mat][pln].TotalValue      += r["Total Value"];
+    matPlantMap[mat][pln].Transit         += getMappedVal(r,"Value of Stock in Transit") - phantomVal;
+    matPlantMap[mat][pln].QC             += getMappedVal(r,"Value of Stock in Quality Inspection");
+    matPlantMap[mat][pln].TotalValue      += getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") - phantomVal + getMappedVal(r,"Value of Stock in Quality Inspection");
     // BUG-BRANCH-2 FIX: TotalQty is derived — recompute rather than accumulate
-    matPlantMap[mat][pln].UnrestrictedQty += r["Unrestricted Stock"];
-    matPlantMap[mat][pln].TransitQty      += r["Stock in Transit"] - phantomQty;
-    matPlantMap[mat][pln].QCQty           += r["Stock in Quality Inspection"];
+    matPlantMap[mat][pln].UnrestrictedQty += getMappedQty(r,"Unrestricted Stock");
+    matPlantMap[mat][pln].TransitQty      += getMappedQty(r,"Stock in Transit") - phantomQty;
+    matPlantMap[mat][pln].QCQty           += getMappedQty(r,"Stock in Quality Inspection");
     matPlantMap[mat][pln].TotalQty        = matPlantMap[mat][pln].UnrestrictedQty
                                           + matPlantMap[mat][pln].TransitQty
                                           + matPlantMap[mat][pln].QCQty;
   });
   // aggregated df is still needed for the material-level Tab 2 table display
-  const df = aggregateByMaterial(baseDf);
+  const df = aggregateByMappedMaterial(baseDf);
 
   const tabsHtml = `
     <div class="branch-tabs" id="branch-tabs">
@@ -1823,25 +2194,26 @@ function renderFlow() {
   const df = applyPageFilter("flow");
 
   renderPhantomAlert("flow-phantom-alert", df);
+  renderMappingBanner("flow-mapping-banner");
 
-  const totalVal   = df.reduce((s,r) => s + r["Total Value"], 0);
-  const transitVal = df.reduce((s,r) => s + r["Value of Stock in Transit"], 0);
-  const qcVal      = df.reduce((s,r) => s + r["Value of Stock in Quality Inspection"], 0);
-  const availVal   = df.reduce((s,r) => s + r["Value of Unrestricted Stock"], 0);
-  const totalQty   = df.reduce((s,r) => s + r["Total Qty"], 0);
-  const availQty   = df.reduce((s,r) => s + r["Unrestricted Stock"], 0);
+  const totalVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock") + getMappedVal(r,"Value of Stock in Transit") + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
+  const transitVal = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Transit"), 0);
+  const qcVal      = df.reduce((s,r) => s + getMappedVal(r,"Value of Stock in Quality Inspection"), 0);
+  const availVal   = df.reduce((s,r) => s + getMappedVal(r,"Value of Unrestricted Stock"), 0);
+  const totalQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock") + getMappedQty(r,"Stock in Transit") + getMappedQty(r,"Stock in Quality Inspection"), 0);
+  const availQty   = df.reduce((s,r) => s + getMappedQty(r,"Unrestricted Stock"), 0);
 
   // FIX-PHANTOM-FLOW: for reorder alerts, only count non-phantom transit as "incoming"
-  const reorderItems = df.filter(r => r["Unrestricted Stock"] === 0 && (
-    (r["Stock in Transit"] > 0 && !(r._phantomTransitQty > 0)) ||
-    r["Stock in Quality Inspection"] > 0
+  const reorderItems = df.filter(r => getMappedQty(r,"Unrestricted Stock") === 0 && (
+    (getMappedQty(r,"Stock in Transit") > 0 && !(r._phantomTransitQty > 0)) ||
+    getMappedQty(r,"Stock in Quality Inspection") > 0
   ));
 
   setKpis("flow-kpis", [
     ["Total Inventory",      fmtETB(totalVal),   `${fmtQty(totalQty)} units`,               "blue"],
     ["Available Stock",      fmtETB(availVal),   `${fmtQty(availQty)} units unrestricted`,   "green"],
-    ["In Transit (Inbound)", fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+r["Stock in Transit"],0))} units`, "amber"],
-    ["In QC",                fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+r["Stock in Quality Inspection"],0))} units`, "red"],
+    ["In Transit (Inbound)", fmtETB(transitVal), `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Transit"),0))} units`, "amber"],
+    ["In QC",                fmtETB(qcVal),      `${fmtQty(df.reduce((s,r) => s+getMappedQty(r,"Stock in Quality Inspection"),0))} units`, "red"],
     ["Reorder Alerts",       String(reorderItems.length), "Zero unrestricted stock", "red"],
   ]);
 
@@ -1850,10 +2222,10 @@ function renderFlow() {
     {key:"Material Description", label:"Material Description", fmt:(val,r)=>renderMatDesc(val,r), raw:true, cellClass:"col-mat-desc-wrap"},
     {key:"Material Group Name",       label:"Material Group"},
     {key:"Plant Name",                label:"Plant"},
-    {key:"Unrestricted Stock",        label:"Avail Qty",        fmt:fmtQty, rawKey:"Unrestricted Stock",        cellClass:"col-qty"},
-    {key:"Stock in Transit",          label:"In Transit",        fmt:fmtQty, rawKey:"Stock in Transit",          cellClass:"col-qty"},
-    {key:"Stock in Quality Inspection",label:"In QC",           fmt:fmtQty, rawKey:"Stock in Quality Inspection",cellClass:"col-qty"},
-    {key:"Value of Stock in Transit", label:"Transit Value (ETB)",fmt:fmtETB,rawKey:"Value of Stock in Transit", cellClass:"col-val"},
+    {key:"Unrestricted Stock",        label:"Avail Qty",          fmt:(v,r)=>fmtQty(getMappedQty(r,"Unrestricted Stock")),          rawKey:"Unrestricted Stock",        cellClass:"col-qty"},
+    {key:"Stock in Transit",          label:"In Transit",          fmt:(v,r)=>fmtQty(getMappedQty(r,"Stock in Transit")),            rawKey:"Stock in Transit",          cellClass:"col-qty"},
+    {key:"Stock in Quality Inspection",label:"In QC",             fmt:(v,r)=>fmtQty(getMappedQty(r,"Stock in Quality Inspection")), rawKey:"Stock in Quality Inspection",cellClass:"col-qty"},
+    {key:"Value of Stock in Transit", label:"Transit Value (ETB)", fmt:(v,r)=>fmtETB(getMappedVal(r,"Value of Stock in Transit")),  rawKey:"Value of Stock in Transit",  cellClass:"col-val"},
     {key:"_purDoc",                   label:"Purchasing Document"},
     {key:"_supPlant",                 label:"Supplying Plant"},
     {key:"_alert",                    label:"Alert", raw:true},
@@ -1864,9 +2236,9 @@ function renderFlow() {
       ...r,
       _purDoc:   info.purDoc,
       _supPlant: info.supPlant,
-      _alert: r["Stock in Transit"] > 0 && r["Stock in Quality Inspection"] > 0
+      _alert: getMappedQty(r,"Stock in Transit") > 0 && getMappedQty(r,"Stock in Quality Inspection") > 0
         ? "<span class='badge badge-red'>Transit+QC</span>"
-        : r["Stock in Transit"] > 0
+        : getMappedQty(r,"Stock in Transit") > 0
         ? "<span class='badge badge-amber'>Awaiting Transit</span>"
         : "<span class='badge badge-amber'>Awaiting QC Release</span>",
     };
@@ -1875,11 +2247,16 @@ function renderFlow() {
     ? buildTable(reorderRows, reorderCols, () => "row-amber")
     : `<div class="alert-info">✓ No reorder alerts — all materials have available unrestricted stock.</div>`;
 
-  // Stock levels chart
-  const plantAgg = sortBy(
-    groupBy(df, "Plant Name", [["avail","Unrestricted Stock"],["transit","Stock in Transit"],["qc","Stock in Quality Inspection"]]),
-    "avail"
-  );
+  // Stock levels chart — use converted quantities
+  const plantStockMap = {};
+  df.forEach(r => {
+    const k = r["Plant Name"] || "(Blank)";
+    if (!plantStockMap[k]) plantStockMap[k] = { "Plant Name": k, avail:0, transit:0, qc:0 };
+    plantStockMap[k].avail   += getMappedQty(r,"Unrestricted Stock");
+    plantStockMap[k].transit += getMappedQty(r,"Stock in Transit");
+    plantStockMap[k].qc      += getMappedQty(r,"Stock in Quality Inspection");
+  });
+  const plantAgg = sortBy(Object.values(plantStockMap), "avail");
   Plotly.newPlot("chart-stock-levels", [
     {type:"bar", name:"Available",  x:plantAgg.map(r=>r["Plant Name"]), y:plantAgg.map(r=>r.avail),  marker:{color:"#3fb950"}},
     {type:"bar", name:"In Transit", x:plantAgg.map(r=>r["Plant Name"]), y:plantAgg.map(r=>r.transit), marker:{color:"#d29922"}},
@@ -1893,8 +2270,8 @@ function renderFlow() {
     {key:"Plant Name",                label:"Receiving Plant"},
     {key:"_purDoc",                   label:"Purchasing Document"},
     {key:"_supPlant",                 label:"Supplying Plant"},
-    {key:"Stock in Transit",          label:"Transit Qty",        fmt:fmtQty, rawKey:"Stock in Transit",          cellClass:"col-qty"},
-    {key:"Value of Stock in Transit", label:"Transit Value (ETB)",fmt:fmtETB, rawKey:"Value of Stock in Transit", cellClass:"col-val"},
+    {key:"Stock in Transit",          label:"Transit Qty",          fmt:(v,r)=>fmtQty(getMappedQty(r,"Stock in Transit")),           rawKey:"Stock in Transit",          cellClass:"col-qty"},
+    {key:"Value of Stock in Transit", label:"Transit Value (ETB)",  fmt:(v,r)=>fmtETB(getMappedVal(r,"Value of Stock in Transit")),  rawKey:"Value of Stock in Transit",  cellClass:"col-val"},
   ];
   // FIX-PHANTOM-FLOW: exclude phantom transit (no PO/supplying plant) from transfer table
   const transferRows = sortBy(df.filter(r => r["Stock in Transit"] > 0 && !(r._phantomTransitQty > 0)), "Value of Stock in Transit").map(r => {
@@ -1975,8 +2352,13 @@ function applyPreviewFilters() {
   const valTypes    = getSelected("filter-valtype");
   filtDf = baseDf.filter(r =>
     (!plants.length    || plants.includes(r["Plant Name"])) &&
-    (!mgs.length       || mgs.includes(r["Material Group Name"])) &&
-    (!mgnames.length   || mgnames.includes(r["Material Group Name"])) &&
+    // BUG-FIX-5: filter-mg and filter-mgname both reference "Material Group Name".
+    // Using AND means selecting a value in one but not the other yields no results.
+    // Fix: treat them as a union — a row passes if it matches either selection
+    // (or neither selection has any values chosen).
+    ((!mgs.length && !mgnames.length) ||
+      mgs.includes(r["Material Group Name"]) ||
+      mgnames.includes(r["Material Group Name"])) &&
     (!valTypes.length  || valTypes.includes(getValuationType(r)))
   );
   renderPreviewTable();
@@ -2042,7 +2424,9 @@ function aggregateByMaterial(df) {
     "Value of Unrestricted Stock",
     "Value of Stock in Quality Inspection",
     "Value of Stock in Transit",
-    "Total Value",
+    // BUG-FIX-4: "Total Value" removed — it is recomputed from components below
+    // (line ~2081). Accumulating it here then overwriting it was wasted work and
+    // would double-count if the recompute step were ever skipped.
   ];
 
   // Group all rows by Material code
@@ -2179,29 +2563,48 @@ function loadIncomingFile(file) {
           return ALLOWED_VT.includes(vt);
         });
 
-        // Parse dates
+        // Parse fields from received goods file.
+        // ISSUE-1 FIX: Expiry Date comes from inventory (SAP master) during
+        // _islCrossMatchInventory(). Posting Date and Valuation Type are
+        // sourced from this file.
         rows.forEach(r => {
-          r._postingDate  = _islParseDate(r["Posting Date"]);
-          r._prodDate     = _islParseDate(r["Production Date"] || r["Mfg Date"] || r["Manufacturing Date"] || "");
-          r._expiryDate   = _islParseDate(r["Shelf Life Expiration Date"] || r["Expiry Date"] || r["Best Before Date"] || "");
-          r._vt           = _islExtractVT(r);
-          // Compute shelf life metrics
-          const { totalSL, remainingSL, ratio, flag } = _islCompute(r._prodDate, r._expiryDate, r._postingDate);
-          r._totalSL     = totalSL;
-          r._remainingSL = remainingSL;
-          r._ratio       = ratio;
-          r._flag        = flag;
+          r._postingDate = _islParseDate(r["Posting Date"]);
+          r._vt          = _islExtractVT(r);
+          // SL metrics computed in _islCrossMatchInventory once inventory
+          // expiry dates are resolved; initialise to grey for safety
+          r._slAtReceiptDays = null;
+          r._receiptFlag     = "grey";
+          r._remainingSL     = null;
+          r._ratio           = null;
+          r._flag            = "grey";
+          r._isExpired       = false;
+          r._dataError       = false;
+          // Inventory enrichment fields — populated by _islCrossMatchInventory
+          r._inv_plants   = "—";
+          r._inv_slocs    = "—";
+          r._inv_totalQty = 0;
+          r._inv_expiryDate = null;
+          r._inInventory    = null;
         });
 
         // Store all parsed HO01/ZME+ZMS+ZLC rows before cross-match
         incomingRaw = rows;
+        // ISSUE-7 NOTE: .slice() is a shallow copy — the row objects
+        // themselves are shared between incomingRaw and _incomingRawAll.
+        // This is intentional/fine: _islCrossMatchInventory() mutates those
+        // shared objects (_inv_*, _flag, etc.) in place, and _incomingRawAll
+        // is fully reassigned (not appended to) on the next loadIncomingFile()
+        // call, so stale references never leak across file loads.
         _incomingRawAll = rows.slice(); // preserve full list for re-matching
 
         // ISL-MATCH: cross-match against inventory — keep only rows whose
-        // Material + Batch combination exists somewhere in rawDf (any branch).
-        // If inventory hasn't been loaded yet we keep all rows and re-match
-        // when the inventory file is eventually uploaded (see recomputeIslMatch).
-        if (rawDf.length) _islCrossMatchInventory();
+        // Material + Batch combination exists somewhere in rawDf (any branch),
+        // enrich with inventory expiry/plant/qty, compute SL metrics, and
+        // group duplicate receipts by Material+Batch (ISSUE-2).
+        // Always run — even without inventory loaded yet — so grouping is
+        // applied; re-matched again once inventory is uploaded (see
+        // recomputeIslMatch).
+        _islCrossMatchInventory();
 
         const n = incomingRaw.length;
         const loadedTotal = rows.length;
@@ -2217,8 +2620,9 @@ function loadIncomingFile(file) {
         document.getElementById("incoming-no-file").style.display = "none";
         document.getElementById("incoming-content").style.display = "block";
 
-        if (currentPage === "incoming") renderIncomingShelfLife();
-        else renderPage("incoming");
+        // ISSUE-8 FIX: always go through renderPage so currentPage is set
+        // consistently, regardless of which page we're currently on.
+        renderPage("incoming");
       } catch(err) {
         statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">⚠ Error: ${escHtml(err.message)}</div>`;
       }
@@ -2248,35 +2652,122 @@ function loadIncomingFile(file) {
 let _incomingRawAll = [];   // full parsed HO01 list, unfiltered by inventory
 
 /**
- * Builds a Set of "material||batch" keys from rawDf (all branches)
- * then keeps only incomingRaw rows whose key is present.
- * Also stamps r._inInventory = true/false on every row in _incomingRawAll
- * so callers can optionally inspect what was dropped.
+ * Builds a lookup from rawDf (all branches) keyed by "material||batch",
+ * enriches each received-goods row with inventory-derived fields
+ * (_inv_expiryDate, _inv_plants, _inv_slocs, _inv_totalQty), computes the
+ * shelf-life metrics via _islCompute(), stamps r._inInventory, and finally
+ * groups rows by Material+Batch (ISSUE-2 FIX) so duplicate/partial-delivery
+ * receipts collapse into a single reference row per batch.
+ *
+ * incomingRaw ends up holding the GROUPED, matched rows used for display.
+ * _incomingRawAll retains the full ungrouped list (for KPIs/match counts).
  */
 function _islCrossMatchInventory() {
   if (!rawDf.length) {
     // Inventory not yet loaded — show everything, mark unknown
     _incomingRawAll.forEach(r => { r._inInventory = null; });
-    incomingRaw = _incomingRawAll.slice();
+    incomingRaw = _islGroupByMaterialBatch(_incomingRawAll);
     return;
   }
 
-  // Build lookup key set from inventory (all branches)
-  const invKeys = new Set();
+  // Build lookup map from inventory (all branches): key -> { expiry, plants:Set, slocs:Set, totalQty }
+  const invMap = new Map();
   rawDf.forEach(r => {
     const mat   = String(r["Material"] || "").trim().toUpperCase();
     const batch = String(r["Batch"]    || "").trim().toUpperCase();
-    if (mat && batch) invKeys.add(`${mat}||${batch}`);
+    if (!mat || !batch) return;
+    const key = `${mat}||${batch}`;
+    let entry = invMap.get(key);
+    if (!entry) {
+      entry = { expiry: null, plants: new Set(), slocs: new Set(), totalQty: 0 };
+      invMap.set(key, entry);
+    }
+    if (r._expiry instanceof Date && !entry.expiry) entry.expiry = r._expiry;
+    const plant = String(r["Plant"] || "").trim().toUpperCase();
+    if (plant) entry.plants.add(plant);
+    const sloc = String(r["Storage Location"] || "").trim();
+    if (sloc) entry.slocs.add(sloc);
+    entry.totalQty += (Number(r["Total Qty"]) || 0);
   });
 
-  // Stamp and filter
+  // Stamp, enrich, and compute SL metrics
   _incomingRawAll.forEach(r => {
     const mat   = String(r["Material"] || "").trim().toUpperCase();
     const batch = String(r["Batch"]    || "").trim().toUpperCase();
-    r._inInventory = !!(mat && batch && invKeys.has(`${mat}||${batch}`));
+    const key   = `${mat}||${batch}`;
+    const entry = (mat && batch) ? invMap.get(key) : undefined;
+    r._inInventory = !!entry;
+
+    if (entry) {
+      r._inv_expiryDate = entry.expiry;
+      r._inv_plants     = entry.plants.size ? [...entry.plants].sort().join(" · ") : "—";
+      r._inv_slocs      = entry.slocs.size  ? [...entry.slocs].sort().join(" · ")  : "—";
+      r._inv_totalQty   = entry.totalQty;
+    } else {
+      r._inv_expiryDate = null;
+      r._inv_plants     = "—";
+      r._inv_slocs      = "—";
+      r._inv_totalQty   = 0;
+    }
+
+    const sl = _islCompute(r._inv_expiryDate, r._postingDate);
+    r._slAtReceiptDays = sl.slAtReceiptDays;
+    r._receiptFlag     = sl.receiptFlag;
+    r._remainingSL     = sl.remainingSLDays;
+    r._ratio           = sl.ratio;
+    r._flag            = sl.flag;
+    r._isExpired       = sl.isExpired;
+    r._dataError       = sl.dataError;
   });
 
-  incomingRaw = _incomingRawAll.filter(r => r._inInventory === true);
+  const matched = _incomingRawAll.filter(r => r._inInventory === true);
+  incomingRaw = _islGroupByMaterialBatch(matched);
+}
+
+/**
+ * ISSUE-2 FIX: group received-goods rows by Material+Batch.
+ *   • The row with the LATEST Posting Date becomes the reference receipt
+ *     (its dates/flags/SL metrics are shown).
+ *   • _groupedQty = sum of received quantities across all rows in the group.
+ *   • _receiptCount = number of GR postings collapsed into this row.
+ * Rows without a usable quantity column contribute 0 to _groupedQty.
+ */
+function _islGetRowQty(r) {
+  const candidates = ["Quantity", "Posted Quantity", "Quantity in Unit of Entry",
+    "GR Quantity", "Order Quantity", "Total Qty"];
+  for (const c of candidates) {
+    if (r[c] !== undefined && r[c] !== "") {
+      const n = parseFloat(r[c]);
+      if (!isNaN(n)) return n;
+    }
+  }
+  return 0;
+}
+
+function _islGroupByMaterialBatch(rows) {
+  const groups = new Map();
+  rows.forEach(r => {
+    const mat   = String(r["Material"] || "").trim().toUpperCase();
+    const batch = String(r["Batch"]    || "").trim().toUpperCase();
+    const key   = `${mat}||${batch}`;
+    let g = groups.get(key);
+    if (!g) { g = []; groups.set(key, g); }
+    g.push(r);
+  });
+
+  const result = [];
+  groups.forEach(g => {
+    // Pick the row with the latest posting date as the reference
+    let ref = g[0];
+    for (const r of g) {
+      const a = ref._postingDate ? ref._postingDate.getTime() : -Infinity;
+      const b = r._postingDate   ? r._postingDate.getTime()   : -Infinity;
+      if (b > a) ref = r;
+    }
+    const totalQty = g.reduce((sum, r) => sum + _islGetRowQty(r), 0);
+    result.push({ ...ref, _groupedQty: totalQty, _receiptCount: g.length });
+  });
+  return result;
 }
 
 /**
@@ -2316,67 +2807,146 @@ function _islExtractVT(row) {
 
 function _islParseDate(v) {
   if (!v) return null;
+  // Already a JS Date (cellDates:true path)
   if (v instanceof Date) return isNaN(v.getTime()) ? null : new Date(v.getFullYear(), v.getMonth(), v.getDate());
   const s = String(v).trim();
   if (!s) return null;
-  // Try numeric serial (Excel)
+  // yyyy-mm-dd string — treat as local midnight (BUG-ISL-3 / BUG-8 consistent)
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const dt = new Date(+isoMatch[1], +isoMatch[2] - 1, +isoMatch[3]);
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+  // BUG-ISL-3 FIX: SAP Excel serial dates use the Lotus 1900 leap-year bug
+  // offset, so the correct formula is n - 2 (not n - 1).
+  // XLSX.js with cellDates:true should have already converted these, but guard
+  // against raw numeric values that bypass that path.
   const n = Number(s);
-  if (!isNaN(n) && n > 1000) {
-    const d = new Date(Date.UTC(1900, 0, n - 1));
+  if (!isNaN(n) && n > 1000 && n < 2958466) {  // 2958466 = 31-Dec-9999
+    const d = new Date(Date.UTC(1900, 0, n - 2));
     return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   }
+  // Generic fallback
   const d = new Date(s);
   if (!isNaN(d.getTime())) return new Date(d.getFullYear(), d.getMonth(), d.getDate());
   return null;
 }
 
-function _islCompute(prodDate, expiryDate, postingDate) {
-  if (!prodDate || !expiryDate || !postingDate) {
-    // No production date — show grey
-    if (!prodDate) return { totalSL: null, remainingSL: null, ratio: null, flag: "grey" };
-    return { totalSL: null, remainingSL: null, ratio: null, flag: "grey" };
+// ISSUE-1 FIX: There are now TWO distinct shelf-life metrics:
+//   • SL at Receipt   = Expiry Date − Posting Date (supplier compliance check,
+//                        evaluated at the moment goods were received)
+//   • SL Remaining    = Expiry Date − TODAY (distribution urgency, what's
+//                        actually left right now)
+// "flag" (used for KPIs, chart, and the bar in the table) is driven by
+// SL Remaining (Today), since that's what matters operationally.
+// "receiptFlag" classifies SL at Receipt using year-based thresholds:
+//   < 1.5 yr  → red     (supplier delivered with inadequate shelf life)
+//   1.5-2 yr  → yellow  (borderline, watch)
+//   > 2 yr    → green   (adequate)
+const _ISL_YEAR_DAYS = 365.25;
+
+function _islCompute(expiryDate, postingDate) {
+  // BUG-ISL-2 FIX: cleaned up duplicate grey branch; distinct cases handled:
+  //   • no expiryDate  → grey (cannot calculate anything)
+  //   • no postingDate → grey for SL-at-receipt only (no receipt event date)
+  if (!expiryDate) {
+    return {
+      slAtReceiptDays: null, receiptFlag: "grey",
+      remainingSLDays: null, ratio: null, flag: "grey", isExpired: false,
+      dataError: false,
+    };
   }
+
   const MS_PER_DAY = 86400000;
-  const totalSL     = Math.round((expiryDate - prodDate)  / MS_PER_DAY); // days
-  const remainingSL = Math.round((expiryDate - postingDate) / MS_PER_DAY); // days
-  if (totalSL <= 0) return { totalSL, remainingSL, ratio: 0, flag: "red" };
-  const ratio = remainingSL / totalSL;
+  const today = new Date();
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  // ── SL Remaining (Today): Expiry Date − Today ──────────────────────────
+  const remainingSLDays = Math.round((expiryDate - todayMidnight) / MS_PER_DAY);
+  const isExpired = remainingSLDays < 0;
+
   let flag;
-  if (ratio > 0.90)       flag = "green";
-  else if (ratio >= 0.80) flag = "yellow";
-  else                    flag = "red";
-  return { totalSL, remainingSL, ratio, flag };
+  if (isExpired) {
+    flag = "expired"; // ISSUE-3 FIX: explicit expired state, not a 0% red bar
+  } else {
+    // Ratio of remaining SL to a 2-year (730-day) reference window, used only
+    // for the progress bar fill so the "today" view also has a visual scale.
+    const refWindow = _ISL_YEAR_DAYS * 2;
+    const r = remainingSLDays / refWindow;
+    flag = r > 0.5 ? "green" : r >= 0.375 ? "yellow" : "red"; // >1yr / 9mo-1yr / <9mo left
+  }
+  const ratio = isExpired ? null : Math.max(0, Math.min(1, remainingSLDays / (_ISL_YEAR_DAYS * 2)));
+
+  // ── SL at Receipt: Expiry Date − Posting Date ──────────────────────────
+  let slAtReceiptDays = null;
+  let receiptFlag = "grey";
+  let dataError = false;
+  if (postingDate) {
+    slAtReceiptDays = Math.round((expiryDate - postingDate) / MS_PER_DAY);
+    if (slAtReceiptDays <= 0) {
+      // ISSUE-4 FIX: production/posting date after expiry is a SAP data
+      // quality issue — flag separately, don't silently fold into "red".
+      dataError = true;
+      receiptFlag = "data_error";
+    } else {
+      const years = slAtReceiptDays / _ISL_YEAR_DAYS;
+      if (years < 1.5)      receiptFlag = "red";
+      else if (years <= 2)  receiptFlag = "yellow";
+      else                  receiptFlag = "green";
+    }
+  }
+
+  return { slAtReceiptDays, receiptFlag, remainingSLDays, ratio, flag, isExpired, dataError };
 }
 
 function _islPopulateFilters() {
+  // BUG-ISL-5 FIX: use fmtLocalDate() (local date parts) not toISOString()
+  // which shifts UTC midnight dates by one day in UTC+3 (Ethiopia).
+
   // Posting dates — sorted descending (most recent first)
   const dates = [...new Set(
     incomingRaw
       .map(r => r._postingDate)
       .filter(d => d instanceof Date)
-      .map(d => d.toISOString().slice(0,10))
+      .map(d => fmtLocalDate(d))
   )].sort().reverse();
 
   const dateEl = document.getElementById("isl-filter-date");
   if (dateEl) {
     dateEl.innerHTML = `<option value="">All Posting Dates</option>` +
-      dates.map(d => `<option value="${d}">${d}</option>`).join("");
+      dates.map(d => `<option value="${escHtml(d)}">${escHtml(d)}</option>`).join("");
   }
 
-  // Storage locations
+  // Storage locations from received data (HO01 receiving sloc)
   const slocs = [...new Set(incomingRaw.map(r => String(r["Storage Location"] || "").trim()).filter(Boolean))].sort();
   const slocEl = document.getElementById("isl-filter-sloc");
   if (slocEl) {
     slocEl.innerHTML = `<option value="">All Storage Locations</option>` +
-      slocs.map(s => `<option value="${s}">${escHtml(s)}</option>`).join("");
+      slocs.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("");
+  }
+
+  // BUG-ISL-4 FIX: plant filter — populated from inventory match (_inv_plants)
+  // so user can filter to see which received batches are currently at a branch
+  const plantSet = new Set();
+  incomingRaw.forEach(r => {
+    if (r._inv_plants && r._inv_plants !== "—") {
+      r._inv_plants.split(" · ").forEach(p => { if (p) plantSet.add(p.trim()); });
+    }
+  });
+  const plants = [...plantSet].sort();
+  const plantEl = document.getElementById("isl-filter-plant");
+  if (plantEl) {
+    plantEl.innerHTML = `<option value="">All Plants</option>` +
+      plants.map(p => `<option value="${escHtml(p)}">${escHtml(p)}</option>`).join("");
   }
 }
 
 function _islGetFiltered() {
-  const { date, valType, sloc, flag } = islFilterState;
+  const { date, valType, sloc, plant, flag } = islFilterState;
   return incomingRaw.filter(r => {
+    // BUG-ISL-5 FIX: compare using local date string (not toISOString)
     if (date) {
-      const rd = r._postingDate ? r._postingDate.toISOString().slice(0,10) : "";
+      const rd = r._postingDate ? fmtLocalDate(r._postingDate) : "";
       if (rd !== date) return false;
     }
     if (valType && r._vt !== valType) return false;
@@ -2384,7 +2954,12 @@ function _islGetFiltered() {
       const rs = String(r["Storage Location"] || "").trim();
       if (rs !== sloc) return false;
     }
-    if (flag && r._flag !== flag) return false;
+    // BUG-ISL-4 FIX: plant filter — check if any _inv_plants entry matches
+    if (plant) {
+      const rp = r._inv_plants || "";
+      if (!rp.split(" · ").some(p => p.trim() === plant)) return false;
+    }
+    if (flag && r._receiptFlag !== flag) return false;
     return true;
   });
 }
@@ -2400,20 +2975,92 @@ function _islFmtPct(ratio) {
 }
 
 function _islFlagLabel(flag) {
-  if (flag === "green")  return `<span class="isl-flag-green">🟢 Green</span>`;
-  if (flag === "yellow") return `<span class="isl-flag-yellow">🟡 Yellow</span>`;
-  if (flag === "red")    return `<span class="isl-flag-red">🔴 Red</span>`;
-  return `<span class="isl-flag-grey">⚪ No Prod Date</span>`;
+  if (flag === "green")      return `<span class="isl-flag-green">🟢 Green</span>`;
+  if (flag === "yellow")     return `<span class="isl-flag-yellow">🟡 Yellow</span>`;
+  if (flag === "red")        return `<span class="isl-flag-red">🔴 Red</span>`;
+  if (flag === "expired")    return `<span class="isl-flag-red">⛔ EXPIRED</span>`;
+  if (flag === "data_error") return `<span style="background:#a371f7;color:#fff;padding:1px 6px;border-radius:4px;font-weight:700;font-size:0.72rem">⚠ Data Error</span>`;
+  return `<span class="isl-flag-grey">⚪ No Expiry Date</span>`;
 }
 
 function _islBarHtml(ratio, flag) {
-  if (ratio === null) return `<span class="isl-flag-grey" style="font-size:0.72rem">No Prod Date</span>`;
+  // ISSUE-3 FIX: explicit EXPIRED state instead of a misleading 0% bar
+  if (flag === "expired") return `<span class="isl-flag-red" style="font-size:0.72rem">⛔ EXPIRED</span>`;
+  if (ratio === null) return `<span class="isl-flag-grey" style="font-size:0.72rem">No Expiry Date</span>`;
   const pct = Math.max(0, Math.min(100, ratio * 100)).toFixed(1);
   const color = flag === "green" ? "#3fb950" : flag === "yellow" ? "#d29922" : "#f85149";
   return `<div class="isl-bar-wrap">
     <div class="isl-bar-bg"><div class="isl-bar-fill" style="width:${pct}%;background:${color}"></div></div>
     <span style="font-size:0.72rem;color:${color};min-width:42px">${pct}%</span>
   </div>`;
+}
+
+// ISSUE-1: separate small badge for "SL at Receipt" classification
+// (< 1.5yr red, 1.5-2yr yellow, > 2yr green; data_error if posting after expiry)
+function _islReceiptFlagLabel(flag) {
+  if (flag === "green")      return `<span class="isl-flag-green">🟢 &gt;2yr</span>`;
+  if (flag === "yellow")     return `<span class="isl-flag-yellow">🟡 1.5-2yr</span>`;
+  if (flag === "red")        return `<span class="isl-flag-red">🔴 &lt;1.5yr</span>`;
+  if (flag === "data_error") return `<span style="background:#a371f7;color:#fff;padding:1px 6px;border-radius:4px;font-weight:700;font-size:0.72rem">⚠ Data Error</span>`;
+  return `<span class="isl-flag-grey">—</span>`;
+}
+
+// ── MATERIAL SEARCH — ISL page ───────────────────────────────────────────
+function renderIslSearch() {
+  const query     = document.getElementById("isl-search-input").value.trim().toLowerCase();
+  const resultsEl = document.getElementById("isl-search-results");
+
+  if (!query) {
+    resultsEl.innerHTML = "";
+    return;
+  }
+  if (!incomingRaw.length) {
+    resultsEl.innerHTML = `<div class="alert-info">No incoming shelf life data loaded yet.</div>`;
+    return;
+  }
+
+  const matches = _islGetFiltered().filter(r => {
+    const code = String(r["Material"] || "").toLowerCase();
+    const desc = String(r["Material Description"] || "").toLowerCase();
+    return code.includes(query) || desc.includes(query);
+  });
+
+  if (!matches.length) {
+    resultsEl.innerHTML = `<div class="alert-info">No records found matching "<b>${escHtml(query)}</b>".</div>`;
+    return;
+  }
+
+  const uniqueMats = [...new Set(matches.map(r => r["Material"]))];
+  const summary = `<div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.5rem">
+    Found <b style="color:var(--text)">${matches.length}</b> record(s) across
+    <b style="color:var(--text)">${uniqueMats.length}</b> material code(s)
+  </div>`;
+
+  const COLS = [
+    { key:"Material",             label:"Material Code" },
+    { key:"Material Description", label:"Material Description" },
+    { key:"Batch",                label:"Batch" },
+    { key:"_vt",                  label:"Val. Type" },
+    { key:"Storage Location",     label:"HO01 Receipt Sloc",
+      fmt: v => v ? escHtml(String(v)) : "—", raw: true },
+    { key:"_postingDate",         label:"Latest Posting Date",
+      fmt: v => v ? fmtLocalDate(v) : "—" },
+    { key:"_inv_expiryDate",      label:"Expiry Date (Inv)",
+      fmt: v => v instanceof Date ? fmtLocalDate(v) : (v ? String(v) : "—") },
+    { key:"_slAtReceiptDays",     label:"SL at Receipt (days)", fmt: v => _islFmtDays(v) },
+    { key:"_receiptFlag",         label:"SL at Receipt Flag",
+      fmt: v => _islReceiptFlagLabel(v), raw: true },
+    { key:"_remainingSL",         label:"SL Remaining Today (days)", fmt: v => _islFmtDays(v) },
+    { key:"_inv_totalQty",        label:"Total Inv. Qty",
+      fmt: v => (v !== undefined && v !== null) ? fmtQty(v) : "—" },
+  ];
+
+  resultsEl.innerHTML = summary + buildTable(matches, COLS);
+}
+
+function clearIslSearch() {
+  document.getElementById("isl-search-input").value = "";
+  document.getElementById("isl-search-results").innerHTML = "";
 }
 
 function renderIncomingShelfLife() {
@@ -2427,59 +3074,92 @@ function renderIncomingShelfLife() {
 
   const rows = _islGetFiltered();
 
-  // KPIs
-  const total   = rows.length;
-  const green   = rows.filter(r => r._flag === "green").length;
-  const yellow  = rows.filter(r => r._flag === "yellow").length;
-  const red     = rows.filter(r => r._flag === "red").length;
-  const grey    = rows.filter(r => r._flag === "grey").length;
+  // KPIs — based on SL at Receipt Flag (_receiptFlag)
+  const total      = rows.length;
+  const green      = rows.filter(r => r._receiptFlag === "green").length;
+  const yellow     = rows.filter(r => r._receiptFlag === "yellow").length;
+  const red        = rows.filter(r => r._receiptFlag === "red").length;
+  const dataErrors = rows.filter(r => r._receiptFlag === "data_error").length;
+  const grey       = rows.filter(r => r._receiptFlag === "grey").length;
 
-  const matchedOf = _incomingRawAll.length > incomingRaw.length
-    ? ` (${incomingRaw.length.toLocaleString()} / ${_incomingRawAll.length.toLocaleString()} matched)`
-    : "";
+  const totalMatched  = incomingRaw.length;
+  const totalReceived = _incomingRawAll.length;
+  const matchNote = totalReceived > totalMatched
+    ? `${totalMatched.toLocaleString()} batches / ${totalReceived.toLocaleString()} receipts`
+    : `${totalMatched.toLocaleString()} batches`;
 
   setKpis("isl-kpis", [
-    kpiCard("Total Records",    total.toLocaleString(), `HO01 · ZME/ZMS/ZLC${matchedOf}`, "var(--blue)"),
-    kpiCard("🟢 Green (>90%)",  green.toLocaleString(), "Adequate shelf life", "var(--green)"),
-    kpiCard("🟡 Yellow (80-90%)", yellow.toLocaleString(), "Watch closely", "var(--amber)"),
-    kpiCard("🔴 Red (≤80%)",    red.toLocaleString(), "Below threshold", "var(--red)"),
-    kpiCard("⚪ No Prod Date",  grey.toLocaleString(), "Cannot calculate", "var(--muted)"),
+    ["Matched Batches",    total.toLocaleString(),      `HO01 · ZME/ZMS/ZLC · ${matchNote}`,  "blue"],
+    ["🟢 Green (>2yr)",    green.toLocaleString(),      "Adequate SL at receipt",              "green"],
+    ["🟡 Yellow (1.5–2yr)", yellow.toLocaleString(),   "Borderline SL at receipt",            "amber"],
+    ["🔴 Red (<1.5yr)",    red.toLocaleString(),        "Short SL at receipt",                 "red"],
+    ["⚠ Data Errors",      dataErrors.toLocaleString(),"Posting date after expiry (SAP)",     "purple"],
+    ["⚪ No Expiry Date",   grey.toLocaleString(),      "Cannot calculate SL at receipt",      "muted"],
   ]);
 
-  // Chart: stacked bar per Storage Location
+  // CHART UPDATE: Shelf Life at Receipt Flag distribution by HO01 Storage
+  // Location — uses _receiptFlag (Expiry − Posting Date, supplier compliance)
+  // grouped by the storage location the goods were received into.
   const slocMap = {};
   rows.forEach(r => {
-    const sl = String(r["Storage Location"] || "").trim() || "(Blank)";
-    if (!slocMap[sl]) slocMap[sl] = { green:0, yellow:0, red:0, grey:0 };
-    slocMap[sl][r._flag]++;
+    const sloc = String(r["Storage Location"] || "").trim() || "(Blank)";
+    if (!slocMap[sloc]) slocMap[sloc] = { green:0, yellow:0, red:0, data_error:0, grey:0 };
+    const bucket = slocMap[sloc][r._receiptFlag] !== undefined ? r._receiptFlag : "grey";
+    slocMap[sloc][bucket]++;
   });
   const slocs = Object.keys(slocMap).sort();
   Plotly.newPlot("isl-chart-sloc", [
-    { name:"🟢 Green",        x: slocs, y: slocs.map(s => slocMap[s].green),  type:"bar", marker:{ color:"#3fb950" } },
-    { name:"🟡 Yellow",       x: slocs, y: slocs.map(s => slocMap[s].yellow), type:"bar", marker:{ color:"#d29922" } },
-    { name:"🔴 Red",          x: slocs, y: slocs.map(s => slocMap[s].red),    type:"bar", marker:{ color:"#f85149" } },
-    { name:"⚪ No Prod Date", x: slocs, y: slocs.map(s => slocMap[s].grey),   type:"bar", marker:{ color:"#6e7681" } },
-  ], { ...pl(), barmode:"stack", height:280 }, PLOTLY_CONFIG);
+    { name:"🟢 Green (>2yr)",        x: slocs, y: slocs.map(s => slocMap[s].green),      type:"bar", marker:{ color:"#3fb950" } },
+    { name:"🟡 Yellow (1.5-2yr)",    x: slocs, y: slocs.map(s => slocMap[s].yellow),     type:"bar", marker:{ color:"#d29922" } },
+    { name:"🔴 Red (<1.5yr)",        x: slocs, y: slocs.map(s => slocMap[s].red),        type:"bar", marker:{ color:"#f85149" } },
+    { name:"⚠ Data Error",          x: slocs, y: slocs.map(s => slocMap[s].data_error), type:"bar", marker:{ color:"#a371f7" } },
+    { name:"⚪ No Expiry Date",      x: slocs, y: slocs.map(s => slocMap[s].grey),       type:"bar", marker:{ color:"#6e7681" } },
+  ], { ...pl(), barmode:"stack", height:280, title:"Shelf Life at Receipt Flag Distribution by Storage Location" }, PLOTLY_CONFIG);
+
 
   // Count info
   const countEl = document.getElementById("isl-count");
   countEl.style.display = "block";
   countEl.textContent = `Showing ${rows.length.toLocaleString()} record${rows.length !== 1 ? "s" : ""}`;
 
-  // Table
+  // BUG-ISL-6 FIX: table columns reflect correct data sources —
+  //   • Expiry Date → from inventory (SAP master via _inv_*)
+  //   • Posting Date & Document Number → from received goods data (latest receipt = reference)
+  //   • Plants in Inventory / Inventory Slocs → enriched from rawDf all branches
+  // ISSUE-1: two SL columns (SL at Receipt vs SL Remaining Today)
+  // ISSUE-2: grouped quantity / receipt count columns
   const COLS = [
-    { key:"Material",                label:"Material Code" },
-    { key:"Material Description",    label:"Material Description" },
-    { key:"Batch",                   label:"Batch" },
-    { key:"_vt",                     label:"Val. Type" },
-    { key:"Storage Location",        label:"Storage Location" },
-    { key:"_postingDate",            label:"Receipt Date",      fmt: v => v ? fmtLocalDate(v) : "—" },
-    { key:"Production Date",         label:"Production Date",   fmt: v => v ? (v instanceof Date ? fmtLocalDate(v) : v) : "—" },
-    { key:"Shelf Life Expiration Date", label:"Expiry Date",    fmt: v => v ? (v instanceof Date ? fmtLocalDate(v) : v) : "—" },
-    { key:"_totalSL",                label:"Total SL (days)",   fmt: v => _islFmtDays(v) },
-    { key:"_remainingSL",            label:"Remaining SL (days)", fmt: v => _islFmtDays(v) },
-    { key:"_ratio",                  label:"SL Remaining %",    fmt: (v, r) => _islBarHtml(v, r._flag), raw: true },
-    { key:"_flag",                   label:"Flag",              fmt: v => _islFlagLabel(v), raw: true },
+    { key:"Material",             label:"Material Code" },
+    { key:"Material Description", label:"Material Description" },
+    { key:"Batch",                label:"Batch" },
+    { key:"_vt",                  label:"Val. Type" },
+    // ── From received goods data (HO01 receipt event, latest of group) ──
+    { key:"Storage Location",     label:"HO01 Receipt Sloc",
+      fmt: v => v ? escHtml(String(v)) : "—", raw: true },
+    { key:"_postingDate",         label:"Latest Posting Date",
+      fmt: v => v ? fmtLocalDate(v) : "—" },
+    { key:"_groupedQty",          label:"Total Qty Received",
+      fmt: v => fmtQty(v) },
+    { key:"_receiptCount",        label:"# GR Postings",
+      fmt: v => v ? v.toLocaleString() : "1" },
+    { key:"Material Document",    label:"GR Document No. (latest)",
+      fmt: v => v ? escHtml(String(v)) : "—", raw: true },
+    // ── From inventory (authoritative SAP master) ──
+    { key:"_inv_expiryDate",      label:"Expiry Date (Inv)",
+      fmt: v => v instanceof Date ? fmtLocalDate(v) : (v ? String(v) : "—") },
+    // SL at Receipt: Expiry − Posting Date (supplier compliance)
+    { key:"_slAtReceiptDays",     label:"SL at Receipt (days)",  fmt: v => _islFmtDays(v) },
+    { key:"_receiptFlag",         label:"SL at Receipt Flag",
+      fmt: v => _islReceiptFlagLabel(v), raw: true },
+    // SL Remaining Today: Expiry − Today (distribution urgency)
+    { key:"_remainingSL",         label:"SL Remaining Today (days)",  fmt: v => _islFmtDays(v) },
+    // ── Current inventory distribution (all branches) ──
+    { key:"_inv_plants",          label:"Plants in Inventory",
+      fmt: v => v ? `<span style="font-size:0.7rem;white-space:nowrap">${escHtml(String(v))}</span>` : "—", raw: true },
+    { key:"_inv_slocs",           label:"Storage Location",
+      fmt: v => v ? `<span style="font-size:0.68rem;color:var(--muted);white-space:nowrap">${escHtml(String(v))}</span>` : "—", raw: true },
+    { key:"_inv_totalQty",        label:"Total Inv. Qty",
+      fmt: v => (v !== undefined && v !== null) ? fmtQty(v) : "—" },
   ];
 
   const wrap = document.getElementById("isl-table-wrap");
@@ -2504,40 +3184,50 @@ function renderIncomingShelfLife() {
   if (rows.length > LIMIT) html += `<div class="alert-info" style="margin-top:0.5rem">Showing first ${LIMIT.toLocaleString()} of ${rows.length.toLocaleString()} records. Download Excel/CSV for full data.</div>`;
   wrap.innerHTML = html;
 
-  // Download buttons
+  // ── Download helpers ────────────────────────────────────────────────────────
+  // Flatten a row for export: strip HTML from raw columns, format dates/ratios
+  const RECEIPT_FLAG_LABEL = { green:">2yr", yellow:"1.5-2yr", red:"<1.5yr", data_error:"Data Error (posting after expiry)", grey:"—" };
+
+  function _islFlatRow(r) {
+    return {
+      "Material Code":            r["Material"]          || "",
+      "Material Description":     r["Material Description"] || "",
+      "Batch":                    r["Batch"]             || "",
+      "Val. Type":                r._vt                  || "",
+      "HO01 Receipt Sloc":        String(r["Storage Location"] || ""),
+      "Latest Posting Date":      r._postingDate ? fmtLocalDate(r._postingDate) : "",
+      "Total Qty Received":       r._groupedQty   !== undefined ? r._groupedQty   : "",
+      "# GR Postings":            r._receiptCount !== undefined ? r._receiptCount : 1,
+      "GR Document No. (latest)": String(r["Material Document"] || r["GR Document"] || ""),
+      "Expiry Date (Inv)":        r._inv_expiryDate instanceof Date ? fmtLocalDate(r._inv_expiryDate) : (r._inv_expiryDate ? String(r._inv_expiryDate) : ""),
+      "SL at Receipt (days)":     r._slAtReceiptDays !== null && r._slAtReceiptDays !== undefined ? r._slAtReceiptDays : "",
+      "SL at Receipt Flag":       RECEIPT_FLAG_LABEL[r._receiptFlag] || r._receiptFlag || "",
+      "SL Remaining Today (days)": r._remainingSL !== null && r._remainingSL !== undefined ? r._remainingSL : "",
+      "Plants in Inventory":      r._inv_plants  || "",
+      "Storage Location":          r._inv_slocs   || "",
+      "Total Inv. Qty":           r._inv_totalQty !== undefined ? r._inv_totalQty : "",
+    };
+  }
+
+  // ISSUE-5 FIX: static export key list — doesn't depend on rows[0], so
+  // headers are always correct even when the filtered set is empty.
+  const EXPORT_KEYS = [
+    "Material Code","Material Description","Batch","Val. Type",
+    "HO01 Receipt Sloc","Latest Posting Date","Total Qty Received","# GR Postings",
+    "GR Document No. (latest)","Expiry Date (Inv)",
+    "SL at Receipt (days)","SL at Receipt Flag",
+    "SL Remaining Today (days)",
+    "Plants in Inventory","Storage Location","Total Inv. Qty",
+  ];
+  const exportColDefs = EXPORT_KEYS.map(k => ({ key: k, label: k }));
+
   document.getElementById("btn-dl-incoming-xlsx").onclick = () => {
-    const exportCols = COLS.filter(c => !c.raw || c.key === "_flag").map(c => ({
-      key: c.key, label: c.label,
-      fmt: c.key === "_flag" ? (v => ({ green:"Green >90%", yellow:"Yellow 80-90%", red:"Red ≤80%", grey:"No Prod Date" }[v] || v)) :
-           c.key === "_ratio" ? (v => v !== null && v !== undefined ? +(v*100).toFixed(2) : null) :
-           c.key === "_postingDate" ? (v => v ? fmtLocalDate(v) : "") :
-           c.fmt || null
-    }));
-    const flat = rows.map(r => {
-      const o = {};
-      exportCols.forEach(c => {
-        const raw = r[c.key] ?? "";
-        o[c.label] = c.fmt ? c.fmt(raw, r) : raw;
-      });
-      return o;
-    });
-    downloadExcel(flat, exportCols.map(c=>({key:c.label,label:c.label})), "incoming_shelf_life.xlsx");
+    const flat = rows.map(_islFlatRow);
+    downloadExcel(flat, exportColDefs, "incoming_shelf_life.xlsx");
   };
   document.getElementById("btn-dl-incoming-csv").onclick = () => {
-    const exportCols = COLS.filter(c => !c.raw || c.key === "_flag");
-    const flat = rows.map(r => {
-      const o = {};
-      exportCols.forEach(c => {
-        let val = r[c.key] ?? "";
-        if (c.key === "_flag") val = { green:"Green >90%", yellow:"Yellow 80-90%", red:"Red ≤80%", grey:"No Prod Date" }[val] || val;
-        else if (c.key === "_ratio") val = val !== null && val !== undefined ? (val*100).toFixed(2)+"%" : "";
-        else if (c.key === "_postingDate") val = val ? fmtLocalDate(val) : "";
-        else if (c.fmt && !c.raw) val = c.fmt(val, r);
-        o[c.label] = val;
-      });
-      return o;
-    });
-    downloadCSV(flat, exportCols.map(c=>({key:c.label,label:c.label})), "incoming_shelf_life.csv");
+    const flat = rows.map(_islFlatRow);
+    downloadCSV(flat, exportColDefs, "incoming_shelf_life.csv");
   };
 }
 
@@ -2622,12 +3312,13 @@ document.addEventListener("DOMContentLoaded", () => {
     islFilterState.date    = (document.getElementById("isl-filter-date")    || {}).value || "";
     islFilterState.valType = (document.getElementById("isl-filter-valtype") || {}).value || "";
     islFilterState.sloc    = (document.getElementById("isl-filter-sloc")    || {}).value || "";
+    islFilterState.plant   = (document.getElementById("isl-filter-plant")   || {}).value || "";
     islFilterState.flag    = (document.getElementById("isl-filter-flag")    || {}).value || "";
     renderIncomingShelfLife();
   });
   document.getElementById("isl-filter-clear").addEventListener("click", () => {
-    islFilterState.date = islFilterState.valType = islFilterState.sloc = islFilterState.flag = "";
-    ["isl-filter-date","isl-filter-valtype","isl-filter-sloc","isl-filter-flag"].forEach(id => {
+    islFilterState.date = islFilterState.valType = islFilterState.sloc = islFilterState.plant = islFilterState.flag = "";
+    ["isl-filter-date","isl-filter-valtype","isl-filter-sloc","isl-filter-plant","isl-filter-flag"].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = "";
     });
     renderIncomingShelfLife();
@@ -2636,6 +3327,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // Stock in Transit file upload
   document.getElementById("transitFileInput").addEventListener("change", e => {
     const f = e.target.files[0]; if (f) loadTransitFile(f);
+    e.target.value = "";
+  });
+
+  // Material Standardization Mapping file upload
+  document.getElementById("mappingFileInput").addEventListener("change", e => {
+    const f = e.target.files[0]; if (f) loadMappingFile(f);
     e.target.value = "";
   });
 
@@ -2685,6 +3382,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("flow-search-clear").addEventListener("click", clearFlowSearch);
   document.getElementById("flow-search-input").addEventListener("keydown", e => {
     if (e.key === "Enter") renderFlowSearch();
+  });
+
+  // ISL material search
+  document.getElementById("isl-search-btn").addEventListener("click", renderIslSearch);
+  document.getElementById("isl-search-clear").addEventListener("click", clearIslSearch);
+  document.getElementById("isl-search-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") renderIslSearch();
   });
 
   // Preview filters
@@ -2769,7 +3473,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // FIX-R6: added export buttons so users with >200 results have a download path.
-  function buildTable(rows, cols, exportFilename) {
+  // BUG-FIX-1: renamed from buildTable → gsrBuildTable to avoid collision with the
+  // global buildTable at line 582 (different signatures: rowClass fn vs exportFilename str).
+  function gsrBuildTable(rows, cols, exportFilename) {
     if (!rows.length) return '<p class="gsr-no-data">No matching records found.</p>';
     let html = '<div class="tbl-wrap"><table><thead><tr>';
     cols.forEach(c => { html += `<th>${escHtml(c.label)}</th>`; });
@@ -2867,7 +3573,7 @@ document.addEventListener("DOMContentLoaded", () => {
       <span class="gsr-badge gsr-badge-stock">In Stock</span>
       ${stockRows.length} record${stockRows.length !== 1 ? "s" : ""} found
     </div>`;
-    html += buildTable(stockRows, stockCols, "search_results_stock.csv");
+    html += gsrBuildTable(stockRows, stockCols, "search_results_stock.csv");
 
     // Transit from separate file (if uploaded)
     if (stockTransitRaw.length > 0) {
@@ -2875,7 +3581,7 @@ document.addEventListener("DOMContentLoaded", () => {
         <span class="gsr-badge gsr-badge-transit">In Transit (Transit File)</span>
         ${transitRows.length} record${transitRows.length !== 1 ? "s" : ""} found
       </div>`;
-      html += buildTable(transitRows, transitCols, "search_results_transit.csv");
+      html += gsrBuildTable(transitRows, transitCols, "search_results_transit.csv");
     } else if (inTransitMain.length > 0) {
       // Fallback: show in-transit column from main data
       html += `<div class="gsr-section-title" style="margin-top:1.2rem">
@@ -2889,7 +3595,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { key: "Stock in Transit",     label: "Transit Qty", cls: "col-qty" },
         { key: "Value of Stock in Transit", label: "Transit Value (ETB)", cls: "col-val" },
       ];
-      html += buildTable(inTransitMain, tCols, "search_results_transit_main.csv");
+      html += gsrBuildTable(inTransitMain, tCols, "search_results_transit_main.csv");
     }
 
     out.innerHTML = html;
