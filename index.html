@@ -8,6 +8,9 @@
     .brand-icon img { height: 44px; width: auto; display: block; }
     .landing-logo img { height: 90px; width: auto; display: block; margin: 0 auto 0.5rem; }
   </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600;700&display=swap" />
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.26.0/plotly.min.js"></script>
@@ -24,6 +27,15 @@
       <div class="brand-sub">INVENTORY MANAGEMENT</div>
     </div>
   </div>
+
+  <!-- Theme Toggle -->
+  <button id="theme-toggle" title="Toggle dark / light mode">
+    <span class="theme-toggle-icon" id="theme-icon">🌙</span>
+    <span class="theme-toggle-label" id="theme-label">Dark Mode</span>
+    <div class="theme-toggle-track">
+      <div class="theme-toggle-thumb"></div>
+    </div>
+  </button>
 
   <nav id="nav">
     <div class="nav-label">NAVIGATION</div>
@@ -109,10 +121,9 @@
     <div class="landing-features">
       <div class="feature-chip">🚚 Transit Analysis</div>
       <div class="feature-chip">⏰ Expiry Watchlist</div>
-      <div class="feature-chip">🔬 Stock in Quality Inspection</div>
+      <div class="feature-chip">🔬 QC Inspection</div>
       <div class="feature-chip">🏢 Branch Compare</div>
       <div class="feature-chip">📦 Inventory Flow</div>
-      <div class="feature-chip">🧪 Incoming Shelf Life</div>
     </div>
   </div>
 
@@ -531,6 +542,38 @@
 
 </main>
 
+<script>
+// ── THEME TOGGLE ─────────────────────────────────────────────
+(function() {
+  const ROOT   = document.documentElement;
+  const btn    = document.getElementById('theme-toggle');
+  const icon   = document.getElementById('theme-icon');
+  const label  = document.getElementById('theme-label');
+
+  // Restore saved preference
+  const saved = localStorage.getItem('epss-theme');
+  if (saved === 'light') {
+    ROOT.setAttribute('data-theme', 'light');
+    icon.textContent  = '☀️';
+    label.textContent = 'Light Mode';
+  }
+
+  btn.addEventListener('click', () => {
+    const isLight = ROOT.getAttribute('data-theme') === 'light';
+    if (isLight) {
+      ROOT.removeAttribute('data-theme');
+      icon.textContent  = '🌙';
+      label.textContent = 'Dark Mode';
+      localStorage.setItem('epss-theme', 'dark');
+    } else {
+      ROOT.setAttribute('data-theme', 'light');
+      icon.textContent  = '☀️';
+      label.textContent = 'Light Mode';
+      localStorage.setItem('epss-theme', 'light');
+    }
+  });
+})();
+</script>
 <script src="filters.js"></script>
 <script src="script.js"></script>
 </body>
