@@ -909,13 +909,42 @@ function loadMappingFile(file) {
           return null;
         };
 
-        const colSource  = gc("material code sorce","material code source","material code (source)","source material code","source code");
-        const colTarget  = gc("material code target","target material code","target code");
-        const colFactor  = gc("conversion factor","factor","conv factor","conversion");
-        const colTgtDesc = gc("material description (target)","target description","target desc","material description target");
+        const colSource  = gc(
+          "material code sorce","material code source","material code (source)",
+          "source material code","source code","mat code source","mat. code source",
+          "source mat code","source material","material source","source"
+        );
+        const colTarget  = gc(
+          "material code target","target material code","target code",
+          "mat code target","mat. code target","target mat code",
+          "target material","material target","target"
+        );
+        const colFactor  = gc(
+          "conversion factor","factor","conv factor","conversion",
+          "conv. factor","uom factor","unit factor","qty factor","quantity factor"
+        );
+        const colTgtDesc = gc(
+          "material description (target)","target description","target desc",
+          "material description target","target material description","desc target",
+          "description (target)","description target"
+        );
 
         if (!colSource || !colTarget || !colFactor) {
-          statusEl.innerHTML = `<div class="status-ok" style="color:var(--red)">✗ Missing required columns.<br/><span style="font-size:0.65rem">Need: Material Code Source, Material Code Target, Conversion Factor</span></div>`;
+          const missing = [
+            !colSource && "Material Code Source",
+            !colTarget && "Material Code Target",
+            !colFactor && "Conversion Factor",
+          ].filter(Boolean);
+          const actualCols = Object.keys(data[0]).map(k => k.trim()).join(", ");
+          statusEl.innerHTML = `
+            <div class="status-ok" style="color:var(--red)">✗ Missing required columns: ${missing.join(", ")}</div>
+            <div style="font-size:0.65rem;margin-top:4px;color:var(--muted)">
+              <b>Accepted names:</b><br>
+              • Source: "Material Code Source" (or "Material Code Sorce", "Source Code")<br>
+              • Target: "Material Code Target" (or "Target Material Code", "Target Code")<br>
+              • Factor: "Conversion Factor" (or "Factor", "Conv Factor")<br>
+              <b style="color:var(--amber)">Columns found in your file:</b> ${escHtml(actualCols)}
+            </div>`;
           return;
         }
 
