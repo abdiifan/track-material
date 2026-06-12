@@ -113,6 +113,7 @@ body { display: flex; }
 .kpi-card.amber::before  { background: var(--amber); }
 .kpi-card.red::before    { background: var(--red); }
 .kpi-card.purple::before { background: var(--purple); }
+.kpi-card.muted::before  { background: var(--muted); }
 .kpi-label { color: var(--muted); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.4rem; }
 .kpi-value { color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 1.45rem; font-weight: 600; line-height: 1; margin-bottom: 0.25rem; }
 .kpi-sub   { color: var(--dim); font-size: 0.68rem; }
@@ -566,3 +567,63 @@ td.col-mat-desc-wrap { max-width: 280px; white-space: normal; line-height: 1.4; 
 
 .incoming-upload-btn { border-color: #3fb950 !important; color: #3fb950 !important; }
 .incoming-upload-btn:hover { border-color: #56d364 !important; }
+
+/* ── MATERIAL STANDARDIZATION MAPPING ── */
+.mapping-upload-btn { border-color: #a371f7 !important; color: #a371f7 !important; }
+.mapping-upload-btn:hover { background: rgba(163,113,247,0.08) !important; border-color: #c9a7ff !important; }
+
+/* Mapping status badge */
+#mappingFileStatus {
+  font-size: 0.7rem; margin-top: 0.5rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem 0.7rem; display: none;
+}
+#mappingFileStatus .status-ok  { color: var(--purple); font-weight: 600; font-size: 0.68rem; }
+#mappingFileStatus .status-name { color: var(--muted); margin-top: 2px; font-size: 0.68rem; }
+#mappingFileStatus .status-stats { color: var(--dim); margin-top: 3px; font-size: 0.65rem; line-height: 1.4; }
+
+/* Mapping banner shown at top of every page when mapping is active */
+.mapping-active-banner {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  background: rgba(163,113,247,0.07); border: 1px solid rgba(163,113,247,0.25);
+  border-radius: 8px; padding: 0.5rem 0.85rem;
+  font-size: 0.75rem; color: var(--purple);
+  margin-bottom: 1rem;
+}
+.mapping-active-banner b { color: #c9a7ff; }
+.mapping-active-banner .mapping-badge-dismiss {
+  margin-left: auto; background: none; border: 1px solid rgba(163,113,247,0.3);
+  border-radius: 5px; color: var(--purple); font-size: 0.68rem; cursor: pointer;
+  padding: 2px 8px; font-family: inherit; transition: background 0.15s;
+}
+.mapping-active-banner .mapping-badge-dismiss:hover { background: rgba(163,113,247,0.1); }
+
+/* Original code pill shown in tables next to mapped target material */
+.mat-orig-pill {
+  display: inline-block;
+  font-size: 0.63rem;
+  font-family: 'IBM Plex Mono', monospace;
+  background: rgba(163,113,247,0.1);
+  color: #a371f7;
+  border: 1px solid rgba(163,113,247,0.22);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 5px;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+.mat-mapped-badge {
+  display: inline-block;
+  font-size: 0.58rem; font-weight: 700;
+  background: rgba(163,113,247,0.15);
+  color: #a371f7;
+  border: 1px solid rgba(163,113,247,0.3);
+  border-radius: 3px; padding: 0px 5px;
+  margin-left: 4px; vertical-align: middle;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+/* Conversion factor indicator in qty cells */
+.mat-conv-note {
+  display: block; font-size: 0.6rem; color: var(--purple);
+  font-style: italic; margin-top: 1px; opacity: 0.8;
+}
