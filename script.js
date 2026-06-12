@@ -1,18 +1,3 @@
-/  FIX-PHANTOM-VISIBLE Unverified transit items (phantom) are now fully visible to
-//                   users instead of only being mentioned in an alert banner.
-//                   Changes:
-//                   • Transit page — new "⚠️ Unverified Transit Items" amber section
-//                     appears directly on the page with a full table (Material, Plant,
-//                     Qty, Value), 5 KPI cards, and a CSV download button. The
-//                     "Verified Transit Items" section below it is clearly labelled.
-//                   • Transit KPI row — "Unverified Transit Items" card sub-label
-//                     updated to "see section below ↓" so users know where to look.
-//                   • Dashboard / Branch / Flow phantom alert banners — now include
-//                     a "Show unverified items ▾" toggle that expands an inline table
-//                     of phantom rows directly in the alert, plus a "Transit page →"
-//                     link. Users no longer have to navigate away just to see the list.
-// =============================================================================
-
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
 const REQUIRED_COLUMNS = [
   "Material","Material Description","Plant","Plant Name",
