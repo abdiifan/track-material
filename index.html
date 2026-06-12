@@ -10,11 +10,19 @@
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600;700&display=swap" />
+  <!-- Non-blocking font load — eliminates render-blocking font stylesheet -->
+  <link rel="preload" as="style"
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600;700&display=swap"
+    onload="this.onload=null;this.rel='stylesheet'" />
+  <noscript>
+    <link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;500;600;700&display=swap" />
+  </noscript>
   <link rel="stylesheet" href="style.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.26.0/plotly.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Plotly basic bundle: ~1 MB vs ~3.5 MB for plotly.min.js; covers bar/scatter/pie -->
+  <script defer src="https://cdn.plot.ly/plotly-basic-2.26.0.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
@@ -604,7 +612,7 @@
   });
 })();
 </script>
-<script src="filters.js"></script>
-<script src="script.js"></script>
+<script defer src="filters.js"></script>
+<script defer src="script.js"></script>
 </body>
 </html>
